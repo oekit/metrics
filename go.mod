@@ -4,7 +4,7 @@ go 1.26.0
 
 require (
 	github.com/prometheus/client_golang v1.24.1
-	github.com/yi-nology/ekit-core v0.1.0
+	github.com/yi-nology/ekit-core v0.2.0
 )
 
 require (
