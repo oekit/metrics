@@ -23,7 +23,7 @@
 //
 // 所有服务改为注入 ekit/version 包的变量：
 //
-//	MOD="github.com/yi-nology/ekit-observability"
+//	MOD="github.com/yi-nology/ekit-metrics"
 //	LDFLAGS="-X ${MOD}/version.BuildCommit=${GIT_COMMIT} ..."
 //
 // # 自定义 Registry
