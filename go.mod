@@ -1,10 +1,10 @@
-module github.com/yi-nology/ekit-metrics
+module github.com/openekit/metrics
 
 go 1.26.0
 
 require (
+	github.com/openekit/core v0.3.1
 	github.com/prometheus/client_golang v1.24.1
-	github.com/yi-nology/ekit-core v0.3.0
 )
 
 require (

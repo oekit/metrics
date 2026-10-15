@@ -4,7 +4,7 @@ import (
 	"runtime"
 	"sync"
 
-	"github.com/yi-nology/ekit-core/version"
+	"github.com/openekit/core/version"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
