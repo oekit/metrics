@@ -14,14 +14,24 @@
 go get github.com/oekit/metrics@v0.1.4
 ```
 
-## 快速使用
+## 能做什么
 
+- **Init(serviceName)**：一键初始化统一 Registry
+- **弹性指标族**：熔断状态/迁移/拒绝/重试计数，httpx/nns-endpoint/kitex 三路共享契约
+- 配合 oekit/hertz 的 `/metrics` 端点暴露
+
+## 使用示例
+
+### 接入
 ```go
 import "github.com/oekit/metrics"
 
-metrics.Init("my-service") // Registry 就绪；/metrics 端点见 oekit/hertz/hertz/metrics
+metrics.Init("my-service") // 之后 hertz 挂 /metrics 端点即可被抓取
 ```
-
+### 自定义 Registry
+```go
+h.GET("/metrics", hertzmetrics.MetricsHandlerFor(myRegistry))
+```
 ## 包清单
 
 - 根包 \`metrics\`（import \`github.com/oekit/metrics\`）— Registry、Init(service)、默认注册
