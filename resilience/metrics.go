@@ -1,6 +1,6 @@
 // Package resilience 提供客户端弹性设施（熔断器/重试）的共享 Prometheus
 // 指标集，供 network/httpx 与 nns/endpoint 等弹性栈消费方复用，保证
-// 全库熔断/重试可观测性的指标命名与标签基数规范一致（PLATFORM_CONTRACT §5.5）。
+// 全库熔断/重试可观测性的指标命名与标签基数规范一致（平台契约 §5.5）。
 //
 // 标签约定：
 //   - service: 目标服务名（受控低基数）
