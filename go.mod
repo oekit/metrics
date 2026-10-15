@@ -1,9 +1,9 @@
-module github.com/openekit/metrics
+module github.com/oekit/metrics
 
 go 1.26.0
 
 require (
-	github.com/openekit/core v0.3.1
+	github.com/oekit/core v0.3.2
 	github.com/prometheus/client_golang v1.24.1
 )
 
