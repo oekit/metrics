@@ -1,7 +1,7 @@
 # AGENTS.md — oekit/metrics
 
 > Prometheus 门面（Registry / Init）+ metrics/resilience 弹性指标族
-> 当前版本：`v0.1.4` · module：`github.com/oekit/metrics` · org：[oekit = Open Easy Kit](https://oekit.github.io)
+> 当前版本：`v0.1.5` · module：`github.com/oekit/metrics` · org：[oekit = Open Easy Kit](https://oekit.github.io)
 
 ## 本仓包含
 `./`、`resilience/`
