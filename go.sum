@@ -17,8 +17,8 @@ github.com/kylelemons/godebug v1.1.0 h1:RPNrshWIDI6G2gRW9EHilWtl7Z6Sb1BR0xunSBf0
 github.com/kylelemons/godebug v1.1.0/go.mod h1:9/0rRGxNHcop5bhtWyNeEfOS8JIWk580+fNqagV/RAw=
 github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 h1:C3w9PqII01/Oq1c1nUAm88MOHcQC9l5mIlSMApZMrHA=
 github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822/go.mod h1:+n7T8mK8HuQTcFwEeznm/DIxMOiR9yIdICNftLE1DvQ=
-github.com/oekit/core v0.6.0 h1:3D0r8ff/nOi6/4cc65gxgIDnAznh1XRFzD3QEUOaRWU=
-github.com/oekit/core v0.6.0/go.mod h1:HhBTwYHU5MUp9tfNvHjfZv6P4yglQmn4jKmz98dUIsM=
+github.com/oekit/core v0.7.0 h1:Iexn7+2xgi3NFexHoYgEzWWxEz7H1AjxyAQ7tLibA98=
+github.com/oekit/core v0.7.0/go.mod h1:HhBTwYHU5MUp9tfNvHjfZv6P4yglQmn4jKmz98dUIsM=
 github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
 github.com/prometheus/client_golang v1.23.2 h1:Je96obch5RDVy3FDMndoUsjAhG5Edi49h0RJWRi/o0o=
