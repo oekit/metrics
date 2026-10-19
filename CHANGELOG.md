@@ -1,3 +1,7 @@
+## [v0.1.9] — 2026-10-20
+
+- feat(resilience): 熔断状态类型化——新增 `CircuitState` 枚举（Closed=0/HalfOpen=1/Open=2，与 gobreaker.State 数值一致）与 `ObserveTransitionTyped(service, kind, from, to CircuitState)`；`ObserveTransition(…, int, int)` 保留为历史 shim（内部显式三态映射，**产出标签逐字节不变**，kitex 等下游不受影响）。旧 int 常量与类型化枚举之间加编译期断言（数组长度必须为 0，差值非 0 即编译失败）；与 gobreaker 数值一致性的钉子放在**消费侧**（httpx），谁改数值谁编译红。
+
 ## [v0.1.8] — 2026-10-19
 
 - build: 矩阵内依赖地板对齐（align_floors 不动点）：core v0.7.0 → v0.9.2
