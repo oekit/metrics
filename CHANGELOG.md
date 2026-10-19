@@ -7,6 +7,10 @@
 由 ekit v0.34.0（git.enjoye.top/enjoydream/ekit，冻结维护）拆分而来。所有 notable 变更记录如下。
 
 
+## [v0.1.8] — 2026-10-19
+
+- build: 矩阵内依赖地板对齐（align_floors 不动点）：core v0.7.0 → v0.9.2
+
 ## [v0.1.6] — 2026-10-17
 
 - fix(deps): 内部依赖地板 core v0.3.2 → v0.6.0；go 最低版本降至 1.24.0——锁定 prometheus 依赖 go1.24 兼容版（client_golang v1.23.2 / procfs v0.19.2 / x/sys v0.41.0，common 随 MVS v0.67.5）
