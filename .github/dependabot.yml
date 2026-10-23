@@ -6,6 +6,29 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # 地板约束：基础层地板硬钉 1.24（口径以 matrix-tools/matrix.py 的
+    # GO_FLOOR_BASE_LAYER / GO_FLOOR_BASE_MAX 为唯一事实源；门禁 audit.py 的
+    # check_go_floor_pairing 会把「基础层地板 > 1.24」判红，因为基础包地板抬高
+    # 会传染全部下游）。
+    # github.com/prometheus/client_golang 从 v1.24.0 起要求 go>=1.25（v1.25.0 要求
+    # go 1.26），而 dependabot 升级依赖时会**顺手把本仓 go.mod 的 go 指令抬到新依赖
+    # 要求的高度**（实测 PR #24 的 diff：go 1.24.0 → go 1.26.0）⇒ CI 用 1.24 工具链
+    # （GOTOOLCHAIN=local）读一个声明 1.26 的 go.mod，必然报
+    # "go: go.mod requires go >= 1.26.0"，升级按当前口径无法合入。
+    # 实测 2026-10-21：dependabot weekly 的 all-deps PR #24 就是这么红的，
+    # 只能人工关单留档——而依据只躺在已关闭 PR 的评论里，下周它还会再来。
+    # 这里显式 ignore 掉越界版本：bot 不再产出按当前口径必然失败的升级。
+    # 边界取 v1.24.0（首个要求 go>=1.25 的版本），不是 v1.25.0——v1.24.0 同样超地板，
+    # 写 ">= 1.25.0" 会让 bot 继续提议 v1.24.0（并照样把 go.mod 抬到 1.25）。
+    # 只锁 client_golang 即可：实测 dependabot 只对「直接依赖」开升级，间接依赖
+    # （prometheus/common、prometheus/procfs、golang.org/x/sys）只随直接依赖搭车；
+    # client_golang 被 ignore 后搭车链就断了。内部依赖 oekit/core 的 go 指令仍是
+    # 1.24，可正常升级，不受影响。
+    # 解锁条件：本仓地板抬到 1.25+ 时删除本条 ignore，并同步 CI 的 go-version
+    # （两者必须成对，否则最低支持版本从未被验证）。
+    ignore:
+      - dependency-name: "github.com/prometheus/client_golang"
+        versions: [">= 1.24.0"]
     groups:
       all-deps:
         patterns:
