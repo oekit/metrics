@@ -12,6 +12,7 @@ package resilience
 
 import (
 	"errors"
+	"fmt"
 
 	prom "github.com/prometheus/client_golang/prometheus"
 )
@@ -184,11 +185,24 @@ func (m *Metrics) ObserveRetry(service, kind string) {
 
 // registerReuse 注册 collector，同名已注册时复用既有实例（多 Client/工厂
 // 共享同一 Registry + namespace 的常态路径），其余错误仍 panic。
+//
+// 同名同描述符（fqName + help + 标签名都一致）但**类型不同**时，
+// prometheus 返回的是 AlreadyRegisteredError（而非直接拒绝）——此时既有
+// collector 无法当作请求的那个类型复用。此前直接 `.(T)` 会 panic 成一句
+// 不可定位的 "interface conversion: prometheus.Collector is
+// *prometheus.CounterVec, not *prometheus.GaugeVec"；改为换成人能读懂的错误
+// （既有类型 vs 请求类型 + 怎么改）。
 func registerReuse[T prom.Collector](reg prom.Registerer, fresh T) T {
 	if err := reg.Register(fresh); err != nil {
 		var are prom.AlreadyRegisteredError
 		if errors.As(err, &are) {
-			return are.ExistingCollector.(T)
+			existing, ok := are.ExistingCollector.(T)
+			if !ok {
+				panic(fmt.Errorf("metrics: 同名 collector 类型不符：已注册 %T，请求 %T"+
+					"（fqName 与描述符相同但类型不同——请改用同一类型的同名指标，或换 namespace）",
+					are.ExistingCollector, fresh))
+			}
+			return existing
 		}
 		panic(err)
 	}
