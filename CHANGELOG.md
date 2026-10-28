@@ -1,3 +1,7 @@
+## [v0.1.10] — 2026-10-28
+
+- fix(metrics): 同名 collector **类型不符**时的 panic 不可定位——既有 collector 与请求的 collector 描述符相同（fqName + help + 标签名都一致）但类型不同 ⇒ prometheus 返回 `AlreadyRegisteredError` ⇒ 无检查的类型断言 `are.ExistingCollector.(T)` 失败，panic 成一句 `interface conversion: prometheus.Collector is *prometheus.CounterVec, not *prometheus.GaugeVec`。改为有检查的断言 + 人能读懂的错误（既有类型 vs 请求类型 + 怎么改）
+
 ## [v0.1.9] — 2026-10-20
 
 - feat(resilience): 熔断状态类型化——新增 `CircuitState` 枚举（Closed=0/HalfOpen=1/Open=2，与 gobreaker.State 数值一致）与 `ObserveTransitionTyped(service, kind, from, to CircuitState)`；`ObserveTransition(…, int, int)` 保留为历史 shim（内部显式三态映射，**产出标签逐字节不变**，kitex 等下游不受影响）。旧 int 常量与类型化枚举之间加编译期断言（数组长度必须为 0，差值非 0 即编译失败）；与 gobreaker 数值一致性的钉子放在**消费侧**（httpx），谁改数值谁编译红。
