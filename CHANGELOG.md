@@ -1,3 +1,9 @@
+## [v0.1.11] — 2026-11-03
+
+- feat(resilience): 官方状态机转换桥 CircuitStateFromBreakerValue/BreakerValue/FromName——breaker 与 resilience 数值序错位不再靠消费方手写 toCircuitState（#39）
+
+关联问题单：metrics#39。
+
 ## [v0.1.10] — 2026-10-28
 
 - fix(metrics): 同名 collector **类型不符**时的 panic 不可定位——既有 collector 与请求的 collector 描述符相同（fqName + help + 标签名都一致）但类型不同 ⇒ prometheus 返回 `AlreadyRegisteredError` ⇒ 无检查的类型断言 `are.ExistingCollector.(T)` 失败，panic 成一句 `interface conversion: prometheus.Collector is *prometheus.CounterVec, not *prometheus.GaugeVec`。改为有检查的断言 + 人能读懂的错误（既有类型 vs 请求类型 + 怎么改）
