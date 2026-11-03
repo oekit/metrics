@@ -28,6 +28,11 @@ import (
 // 用类型化值而非裸 int 传递状态的理由：矩阵内存在两套状态机且**数值序不同**
 // （gobreaker：Closed=0/HalfOpen=1/Open=2；concurrency/breaker：Closed=0/Open=1/HalfOpen=2），
 // 裸 int 在两套之间流转时编译器无法察觉错位。
+//
+// 与 concurrency/breaker 互转一律走本包官方转换桥：CircuitStateFromBreakerValue /
+// BreakerValue（数值序转换）或 CircuitStateFromName（语义名，零裸 int 路径），
+// 禁止消费方手写映射 switch 或两机裸 int 直传——数值序不同，直传会静默把
+// open 记成 half_open（#39）。
 type CircuitState int
 
 const (
@@ -78,6 +83,10 @@ var (
 )
 
 // CircuitStateFromInt 把历史 int 状态映射为类型化状态。
+//
+// 入参数值序为 gobreaker 序（= 本包枚举序，closed/half-open/open = 0/1/2）。
+// concurrency/breaker 序（closed/open/half-open = 0/1/2）的数值**不同序**，
+// 请走 CircuitStateFromBreakerValue——走错入口会把 open/half_open 互换（#39）。
 //
 // 显式三态映射（不依赖数值区间推断）：未知数值一律归 closed，
 // 避免把非法值写成不存在的标签值。
