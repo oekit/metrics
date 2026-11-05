@@ -1,3 +1,7 @@
+## [v0.1.12] — 2026-11-06
+
+- build: 矩阵依赖地板对齐（维护轮 #233）
+
 ## [v0.1.11] — 2026-11-03
 
 - feat(resilience): 官方状态机转换桥 CircuitStateFromBreakerValue/BreakerValue/FromName——breaker 与 resilience 数值序错位不再靠消费方手写 toCircuitState（#39）
