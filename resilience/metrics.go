@@ -11,9 +11,9 @@
 package resilience
 
 import (
-	"os"
 	"errors"
 	"fmt"
+	"os"
 
 	prom "github.com/prometheus/client_golang/prometheus"
 )

@@ -1,8 +1,8 @@
 package resilience
 
 import (
-	"os"
 	"bufio"
+	"os"
 
 	"strings"
 	"testing"
