@@ -11,6 +11,7 @@
 package resilience
 
 import (
+	"os"
 	"errors"
 	"fmt"
 
@@ -207,9 +208,19 @@ func registerReuse[T prom.Collector](reg prom.Registerer, fresh T) T {
 		if errors.As(err, &are) {
 			existing, ok := are.ExistingCollector.(T)
 			if !ok {
-				panic(fmt.Errorf("metrics: 同名 collector 类型不符：已注册 %T，请求 %T"+
-					"（fqName 与描述符相同但类型不同——请改用同一类型的同名指标，或换 namespace）",
-					are.ExistingCollector, fresh))
+				// 同名但**类型不同**（#44）：消费方先注册过同名 GaugeVec 再换
+				// CounterVec，或两个子系统共享 Registry 撞名。此前 here 是硬断言
+				// panic——Registry 是进程级共享面，撞名是运行期组合态而非启动
+				// 期配置错误，一个子系统炸死整个进程不成比例。降级为可观测：
+				// 新建独立实例照常返回（指标多一套同名不同型的时间序列，
+				// Prometheus 注册面仍有旧的那套），让调用方继续跑、在监控里
+				// 看到「两套序列」后再修命名——对齐「其余错误仍 panic」的边界：
+				// Register 的其它错误（Registry 不可用等）依旧 panic。
+				fmt.Fprintf(os.Stderr,
+					"[metrics] WARN: 同名 collector 类型不符，已降级为独立实例（不与既有序列复用）："+
+						"已注册 %T，请求 %T——请改用同一类型的同名指标或换 namespace\n",
+					are.ExistingCollector, fresh)
+				return fresh
 			}
 			return existing
 		}
