@@ -1,3 +1,9 @@
+## [v0.1.13] — 2026-11-06
+
+- fix(resilience): 同名异型 collector 从 panic 降级为可观测（metrics#44）
+
+关联问题单：metrics#44。
+
 ## [v0.1.12] — 2026-11-06
 
 - build: 矩阵依赖地板对齐（维护轮 #233）
