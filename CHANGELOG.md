@@ -1,3 +1,7 @@
+## [v0.1.15] — 2026-11-08
+
+- build: 依赖地板对齐——本版把 oekit 依赖地板抬到各依赖当前最新已发布版本（matrix-tools/scripts/align_floors.py 维护轮）
+
 ## [v0.1.14] — 2026-11-07
 
 - fix(resilience): registerReuse 同名异型 collector 从 panic 降级为「独立实例 + stderr WARN」（#44）——**更正叙事**：v0.1.13 版本节曾记载本修复，但修复 PR #47 未随该 tag 合入（tag 快照仍是 panic 版），本版为真实落地；降级语义：新建独立实例照常返回（指标多一套同名不同型序列）、stderr WARN 可观测，Register 其它错误仍 panic
