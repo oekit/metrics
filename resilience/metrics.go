@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/oekit/metrics"
 	prom "github.com/prometheus/client_golang/prometheus"
 )
 
@@ -123,12 +124,17 @@ type Metrics struct {
 	retryAttempts      *prom.CounterVec
 }
 
-// NewMetrics 创建并注册弹性指标集。reg 为 nil 时用全局 DefaultRegisterer。
+// NewMetrics 创建并注册弹性指标集。reg 为 nil 时回退到包级
+// metrics.Registry（平台 /metrics 端点暴露的自定义 registry）——与
+// metrics.Init 的注册目标同一处，弹性指标才能被平台抓到。此前回退
+// prom.DefaultRegisterer，httpx/nns-endpoint 等弹性栈指标全部落进默认
+// 全局 registry，/metrics 抓不到熔断/重试指标，可观测性静默丢失（#50）。
+// 确需进默认全局 registry 的调用方显式传 prom.DefaultRegisterer。
 // namespace 为空时用 "resilience"。同一 Registry + namespace 重复创建时
 // 复用已注册的 collector（多 Client/工厂共享指标是常态）。
 func NewMetrics(reg prom.Registerer, namespace string) *Metrics {
 	if reg == nil {
-		reg = prom.DefaultRegisterer
+		reg = metrics.Registry
 	}
 	if namespace == "" {
 		namespace = "resilience"
