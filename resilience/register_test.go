@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/oekit/metrics"
 	prom "github.com/prometheus/client_golang/prometheus"
 )
 
@@ -96,5 +97,58 @@ func TestRegisterReuse_SameType_ReusesExisting(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("未找到 resilience_breaker_state")
+	}
+}
+
+// TestNewMetrics_NilRegFallsBackToPlatformRegistry 回归测试（#50）：reg 为
+// nil 时必须回退到包级 metrics.Registry（平台 /metrics 端点暴露的自定义
+// registry，与 metrics.Init 同一处）——此前回退 prom.DefaultRegisterer，
+// httpx/nns-endpoint 等弹性栈指标全部落进默认全局 registry，/metrics 抓
+// 不到熔断/重试指标，可观测性静默丢失。
+func TestNewMetrics_NilRegFallsBackToPlatformRegistry(t *testing.T) {
+	m := NewMetrics(nil, "")
+	m.ObserveRetry("nil-reg-svc", "httpx")
+
+	// 必须出现在 metrics.Registry（平台抓取面）上，且带正确 series 值。
+	mfs, err := metrics.Registry.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, mf := range mfs {
+		if mf.GetName() != "resilience_retry_attempts_total" {
+			continue
+		}
+		for _, mt := range mf.GetMetric() {
+			var service, kind string
+			for _, lp := range mt.GetLabel() {
+				switch lp.GetName() {
+				case "service":
+					service = lp.GetValue()
+				case "kind":
+					kind = lp.GetValue()
+				}
+			}
+			if service == "nil-reg-svc" && kind == "httpx" {
+				found = true
+				if mt.GetCounter().GetValue() != 1 {
+					t.Fatalf("resilience_retry_attempts_total{nil-reg-svc,httpx} = %v, want 1", mt.GetCounter().GetValue())
+				}
+			}
+		}
+	}
+	if !found {
+		t.Fatal("reg=nil 时指标未注册到 metrics.Registry——平台 /metrics 抓不到弹性指标（#50）")
+	}
+
+	// 不得再进默认全局 registry（修复前的落点）。
+	defMfs, err := prom.DefaultGatherer.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mf := range defMfs {
+		if strings.HasPrefix(mf.GetName(), "resilience_") {
+			t.Fatalf("弹性指标不应注册进 prom.DefaultRegisterer，发现 %s", mf.GetName())
+		}
 	}
 }
