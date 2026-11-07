@@ -1,22 +1,21 @@
 package resilience
 
 import (
+	"bufio"
+	"os"
+
 	"strings"
 	"testing"
 
 	prom "github.com/prometheus/client_golang/prometheus"
 )
 
-// TestRegisterReuse_TypeMismatch_ActionablePanic 回归测试：同名同描述符但
-// **类型不同**时，panic 的信息必须能定位问题。
-//
-// 缺陷成因：既有 collector 与请求的 collector 描述符相同（fqName + help +
-// 标签名都一致）但类型不同 ⇒ prometheus 返回 AlreadyRegisteredError（不是
-// 直接拒绝）⇒ `are.ExistingCollector.(T)` 是一次**无检查的类型断言** ⇒
-// panic 成一句不可定位的
-// "interface conversion: prometheus.Collector is *prometheus.CounterVec,
-// not *prometheus.GaugeVec"——看不出「谁该改成谁」。
-func TestRegisterReuse_TypeMismatch_ActionablePanic(t *testing.T) {
+// TestRegisterReuse_TypeMismatch_DegradesObservably 回归测试（#44）：同名
+// 同描述符但**类型不同**时降级为独立实例 + stderr WARN——此前是硬断言 panic：
+// Registry 是进程级共享面，撞名是运行期组合态（消费方先注册过同名 GaugeVec
+// 再换 CounterVec，或两个子系统共享 Registry 撞名），一个子系统炸死整个进程
+// 不成比例。「其余错误仍 panic」的边界不变（Register 不可用等照旧）。
+func TestRegisterReuse_TypeMismatch_DegradesObservably(t *testing.T) {
 	reg := prom.NewRegistry()
 	// 描述符与 resilience 自己的 breaker_state 完全一致，但类型是 CounterVec。
 	reg.MustRegister(prom.NewCounterVec(prom.CounterOpts{
@@ -25,27 +24,48 @@ func TestRegisterReuse_TypeMismatch_ActionablePanic(t *testing.T) {
 		Help:      "Circuit breaker state: 0=closed 1=half_open 2=open.",
 	}, []string{"service", "kind"}))
 
-	defer func() {
-		r := recover()
-		if r == nil {
-			t.Fatal("类型不符时应 panic")
-		}
-		msg, ok := r.(error)
-		if !ok {
-			t.Fatalf("panic 值应为 error，实得 %T（%v）", r, r)
-		}
-		text := msg.Error()
-		if !strings.Contains(text, "类型不符") {
-			t.Errorf("panic 信息未说明「类型不符」：%q", text)
-		}
-		// 必须同时给出既有类型与请求类型。
-		if !strings.Contains(text, "*prometheus.CounterVec") ||
-			!strings.Contains(text, "*prometheus.GaugeVec") {
-			t.Errorf("panic 信息未同时给出既有类型与请求类型：%q", text)
-		}
-	}()
+	// stderr WARN 可观测
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldStderr := os.Stderr
+	os.Stderr = w
 
-	_ = NewMetrics(reg, "resilience")
+	got := registerReuse(reg, prom.NewGaugeVec(prom.GaugeOpts{
+		Name:      "breaker_state",
+		Namespace: "resilience",
+		Help:      "Circuit breaker state: 0=closed 1=half_open 2=open.",
+	}, []string{"service", "kind"}))
+
+	w.Close()
+	os.Stderr = oldStderr
+	sc := bufio.NewScanner(r)
+	warnSeen := false
+	for sc.Scan() {
+		if strings.Contains(sc.Text(), "同名 collector 类型不符") {
+			warnSeen = true
+			break
+		}
+	}
+	if !warnSeen {
+		t.Fatal("类型不符降级时必须打 stderr WARN")
+	}
+	if got == nil {
+		t.Fatal("降级路径必须返回可用实例")
+	}
+	// 再注册同名（registry 里占位仍是 CounterVec）⇒ 再次命中类型不符 ⇒
+	// 再次降级：不 panic、返回另一个独立实例。降级模式**不复用也不幂等**
+	// （每次调用一个新序列集）——这是降级的代价，换进程存活；命名修复后
+	// 即恢复正常复用路径。
+	again := registerReuse(reg, prom.NewGaugeVec(prom.GaugeOpts{
+		Name:      "breaker_state",
+		Namespace: "resilience",
+		Help:      "Circuit breaker state: 0=closed 1=half_open 2=open.",
+	}, []string{"service", "kind"}))
+	if again == nil {
+		t.Fatal("再次降级也必须返回可用实例")
+	}
 }
 
 // TestRegisterReuse_SameType_ReusesExisting 同类型同名 ⇒ 复用既有实例

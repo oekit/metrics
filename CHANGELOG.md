@@ -1,6 +1,6 @@
 ## [v0.1.13] — 2026-11-06
 
-- fix(resilience): 同名异型 collector 从 panic 降级为可观测（metrics#44）
+- **BREAKING** fix(resilience): `registerReuse` 同名异型 collector 从 panic 降级为「独立实例 + stderr WARN」（[#44](https://github.com/oekit/metrics/issues/44)）——同名同描述符但类型不同（消费方先注册过同名 GaugeVec 再换 CounterVec，或两个子系统共享 Registry 撞名）此前触发 `are.ExistingCollector.(T)` 硬断言 **panic**：Registry 是进程级共享面，撞名是运行期组合态而非启动期配置错误，一个子系统炸死整个进程不成比例。降级语义：新建独立实例照常返回（指标多一套同名不同型序列），stderr WARN 可观测；代价是降级模式**不复用也不幂等**（registry 占位仍是旧类型，每次调用新序列集）——换进程存活，命名修复后即恢复正常复用路径。边界不变：Register 的其它错误（Registry 不可用等）依旧 panic
 
 关联问题单：metrics#44。
 
