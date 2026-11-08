@@ -1,3 +1,9 @@
+## [v0.1.16] — 2026-11-08
+
+- test(resilience): TestNewMetrics_NilRegFallsBackToPlatformRegistry 与轮次解耦（#55）——「reg==nil 回退平台 Registry」契约的断言此前落在进程级全局 metrics.Registry 的初始状态上：registerReuse 撞名复用既有 collector ⇒ -count=2 第二轮 ObserveRetry 在上一轮残留的同一 CounterVec 上累加，=1 断言恒红；本版起该用例先把 metrics.Registry 换成独立新 registry（用完还原）再断言，契约语义不变（回退目标仍必须是平台抓取面变量本身），resilience 包 -count=2 全绿
+
+关联问题单：metrics#55。
+
 ## [v0.1.15] — 2026-11-08
 
 - build: 依赖地板对齐——本版把 oekit 依赖地板抬到各依赖当前最新已发布版本（matrix-tools/scripts/align_floors.py 维护轮）
