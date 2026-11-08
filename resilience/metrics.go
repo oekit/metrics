@@ -47,14 +47,27 @@ const (
 )
 
 // String 返回该状态写入 Prometheus label 的标签值。
+//
+// 合法取值（三个枚举常量）映射 closed / half_open / open。非法取值（未受
+// 构造约束的强转，如 CircuitState(99)）不再静默归 "closed"——closed 是
+// 「健康」标签，把非法值伪装成它正是 #39 要消灭、#66 复发的「指标说谎」
+// （熔断器已 open，指标恒记 closed，值班看到的告警面失真）。非法值降级为
+// fail-loud：stderr WARN 可观测（同 registerReuse 的降级 WARN 先例）+
+// 标签归 "open"（宁可假警报，不谎报健康）。需要 error 的判定走
+// BreakerValue / CircuitStateFromIntChecked（非法值返回 ErrInvalidState）。
 func (s CircuitState) String() string {
 	switch s {
+	case CircuitStateClosed:
+		return "closed"
 	case CircuitStateHalfOpen:
 		return "half_open"
 	case CircuitStateOpen:
 		return "open"
 	default:
-		return "closed"
+		fmt.Fprintf(os.Stderr,
+			"[metrics] WARN: CircuitState.String() 收到非法状态值 %d（合法域 0/1/2），标签按 open 兜底（fail-loud，#66）\n",
+			int(s))
+		return "open"
 	}
 }
 
@@ -90,16 +103,39 @@ var (
 // concurrency/breaker 序（closed/open/half-open = 0/1/2）的数值**不同序**，
 // 请走 CircuitStateFromBreakerValue——走错入口会把 open/half_open 互换（#39）。
 //
-// 显式三态映射（不依赖数值区间推断）：未知数值一律归 closed，
-// 避免把非法值写成不存在的标签值。
+// 非法数值（不在 0/1/2 内）不再静默归 closed——「指标说谎」的最后一个静默
+// 入口：两套状态机数值序错传时熔断器已 open，标签恒 closed，告警面失真
+// （#66，#39 同族；同仓 breaker_compat 的转换桥对非法值一直返回
+// ErrInvalidState，本历史入口此前是唯一例外）。本入口是历史 shim（签名无
+// error，kitex 等下游依赖），非法值降级为 fail-loud：stderr WARN 可观测 +
+// 归 CircuitStateOpen（宁可假警报，不谎报健康）；需要 error 在边界直接
+// 拒绝的新调用方用 CircuitStateFromIntChecked。
 func CircuitStateFromInt(state int) CircuitState {
-	switch state {
-	case int(CircuitStateHalfOpen):
-		return CircuitStateHalfOpen
-	case int(CircuitStateOpen):
+	cs, err := CircuitStateFromIntChecked(state)
+	if err != nil {
+		fmt.Fprintf(os.Stderr,
+			"[metrics] WARN: CircuitStateFromInt 收到非法状态值 %d，按 open 兜底（fail-loud，#66）：%v\n",
+			state, err)
 		return CircuitStateOpen
+	}
+	return cs
+}
+
+// CircuitStateFromIntChecked 是 CircuitStateFromInt 的类型化变体：非法数值
+// 返回 ErrInvalidState 包装错误，绝不静默兜底——与 CircuitStateFromBreakerValue /
+// CircuitStateFromName 同一哲学（兜底会把非法值伪装成 closed，#39/#66）。
+// 入参数值序与 CircuitStateFromInt 相同（gobreaker 序，closed/half-open/open
+// = 0/1/2）。
+func CircuitStateFromIntChecked(state int) (CircuitState, error) {
+	switch state {
+	case int(CircuitStateClosed):
+		return CircuitStateClosed, nil
+	case int(CircuitStateHalfOpen):
+		return CircuitStateHalfOpen, nil
+	case int(CircuitStateOpen):
+		return CircuitStateOpen, nil
 	default:
-		return CircuitStateClosed
+		return 0, fmt.Errorf("%w：gobreaker 序状态数值 %d（合法域 0/1/2）", ErrInvalidState, state)
 	}
 }
 
