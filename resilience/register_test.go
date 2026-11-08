@@ -105,7 +105,18 @@ func TestRegisterReuse_SameType_ReusesExisting(t *testing.T) {
 // registry，与 metrics.Init 同一处）——此前回退 prom.DefaultRegisterer，
 // httpx/nns-endpoint 等弹性栈指标全部落进默认全局 registry，/metrics 抓
 // 不到熔断/重试指标，可观测性静默丢失。
+//
+// #55：判定「reg==nil 回退平台 Registry」这一契约**不得依赖全局 Registry
+// 的初始状态**——进程级全局面在用例/轮次之间没有隔离，registerReuse 在
+// Register 撞名时复用既有 collector ⇒ -count=2 第二轮 ObserveRetry 在上一
+// 轮留下的同一个 CounterVec 上累加，断言 =1 恒红。本轮把 metrics.Registry
+// 换成独立新 registry（用完还原），契约断言落在它上面：回退目标仍必须是
+// metrics.Registry 这个「平台抓取面」变量本身。
 func TestNewMetrics_NilRegFallsBackToPlatformRegistry(t *testing.T) {
+	prevRegistry := metrics.Registry
+	metrics.Registry = prom.NewRegistry()
+	t.Cleanup(func() { metrics.Registry = prevRegistry })
+
 	m := NewMetrics(nil, "")
 	m.ObserveRetry("nil-reg-svc", "httpx")
 
