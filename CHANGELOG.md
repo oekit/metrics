@@ -1,3 +1,9 @@
+## [v0.1.17] — 2026-11-08
+
+- fix(resilience): `CircuitStateFromInt` / `StateName` / `CircuitState.String()` 对非法值不再静默归 closed——fail-open「指标说谎」的最后一批历史入口关闭（#66）。修复前非法数值（不在 0/1/2 域内，典型来源是两套状态机数值序错传：gobreaker 序与 concurrency/breaker 序）走 default 分支恒产出 closed 标签——熔断器已 open，指标却说 closed，值班看到的告警面失真，与同仓 breaker_compat 转换桥「非法值返回 ErrInvalidState、绝不静默归 closed」（#39）的哲学矛盾。修复口径：① 历史 shim（签名无 error，kitex 等下游依赖）非法值降级为 fail-loud——stderr WARN 可观测（同 registerReuse 降级 WARN 先例）+ 归 CircuitStateOpen（宁可假警报，不谎报健康），ObserveTransition 历史入口经同一映射端到端产出 to="open"、gauge=2；② 新增类型化变体 `CircuitStateFromIntChecked(state int) (CircuitState, error)`——非法值返回 ErrInvalidState 包装错误，与 CircuitStateFromBreakerValue / CircuitStateFromName 同一哲学，可在边界直接拒绝；③ `String()` 对非法类型化取值（如 CircuitState(99) 强转）同口径 WARN + "open"。合法三态（0/1/2）的映射与标签产出逐字节不变，下游正确调用点零影响
+
+关联问题单：metrics#66。
+
 ## [v0.1.16] — 2026-11-08
 
 - test(resilience): TestNewMetrics_NilRegFallsBackToPlatformRegistry 与轮次解耦（#55）——「reg==nil 回退平台 Registry」契约的断言此前落在进程级全局 metrics.Registry 的初始状态上：registerReuse 撞名复用既有 collector ⇒ -count=2 第二轮 ObserveRetry 在上一轮残留的同一 CounterVec 上累加，=1 断言恒红；本版起该用例先把 metrics.Registry 换成独立新 registry（用完还原）再断言，契约语义不变（回退目标仍必须是平台抓取面变量本身），resilience 包 -count=2 全绿

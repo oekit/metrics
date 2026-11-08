@@ -47,7 +47,7 @@ func TestStateName(t *testing.T) {
 		StateClosed:   "closed",
 		StateHalfOpen: "half_open",
 		StateOpen:     "open",
-		99:            "closed", // 未知值保守归 closed
+		99:            "open", // 未知值 fail-loud 归 open，不谎报健康（#66）
 	}
 	for state, want := range cases {
 		if got := StateName(state); got != want {
