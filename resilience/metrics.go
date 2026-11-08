@@ -199,9 +199,40 @@ func NewMetrics(reg prom.Registerer, namespace string) *Metrics {
 	return m
 }
 
+// ObserveBreakerStateTyped 记录熔断器当前状态（创建时置 closed、迁移时置
+// 新状态）。
+//
+// 状态以类型化 CircuitState 传入：数值序与 gobreaker.State 一致
+// （Closed=0/HalfOpen=1/Open=2），错位在编译期即被消费侧的钉子挡住，
+// 调用方无需（也不应）裸传 int。
+//
+// 非法取值（未受构造约束的强转，如 CircuitState(99)）不静默原样写入——
+// gauge 数值被 help 文本解释为状态档位，写歪即「指标说谎」（#39/#66 同族）。
+// 非法值降级为 fail-loud：stderr WARN 可观测 + gauge 归 2（=
+// CircuitStateOpen，宁可假警报，不谎报健康，#69）。
+func (m *Metrics) ObserveBreakerStateTyped(service, kind string, state CircuitState) {
+	cs, err := CircuitStateFromIntChecked(int(state))
+	if err != nil {
+		fmt.Fprintf(os.Stderr,
+			"[metrics] WARN: ObserveBreakerStateTyped 收到非法状态值 %d，gauge 按 open 兜底（fail-loud，#69）：%v\n",
+			int(state), err)
+		cs = CircuitStateOpen
+	}
+	m.breakerState.WithLabelValues(service, kind).Set(float64(cs))
+}
+
 // ObserveBreakerState 记录熔断器当前状态（创建时置 closed、迁移时置新状态）。
+//
+// 入参数值序为 gobreaker 序：0=closed / 1=half_open / 2=open（与 gauge help
+// 文本一致）。历史 int shim，内部经 CircuitStateFromInt 收敛为类型化入口：
+// 此前裸 int 原样写入 gauge、无归一无告警，是 #66 转换桥防线上唯一不设防
+// 的入口——两套状态机数值序不同（concurrency/breaker 为 closed/open/
+// half-open=0/1/2），错序的合法值（如 breaker 序 open=1）写进来会被解读成
+// half_open 且连 WARN 都没有（#69）。非法值 fail-loud：stderr WARN +
+// gauge 归 2（与 #66 同款）。运行期无法分辨「合法但错序」的 int，彻底消除
+// 错位请改用 ObserveBreakerStateTyped。
 func (m *Metrics) ObserveBreakerState(service, kind string, state int) {
-	m.breakerState.WithLabelValues(service, kind).Set(float64(state))
+	m.ObserveBreakerStateTyped(service, kind, CircuitStateFromInt(state))
 }
 
 // ObserveTransitionTyped 记录一次状态迁移（同时刷新当前状态 gauge）。
@@ -212,7 +243,7 @@ func (m *Metrics) ObserveBreakerState(service, kind string, state int) {
 // 时序与历史入口保持一致：先算好两端标签值，再写 counter，最后刷 gauge。
 func (m *Metrics) ObserveTransitionTyped(service, kind string, from, to CircuitState) {
 	m.breakerTransitions.WithLabelValues(service, kind, from.String(), to.String()).Inc()
-	m.ObserveBreakerState(service, kind, int(to))
+	m.ObserveBreakerStateTyped(service, kind, to)
 }
 
 // ObserveTransition 记录一次状态迁移（同时刷新当前状态 gauge）。
