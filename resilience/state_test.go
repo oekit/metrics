@@ -213,6 +213,99 @@ test_breaker_transitions_total{from="closed",kind="httpx",service="svc",to="open
 	}
 }
 
+// TestObserveBreakerState_TypedMatchesGaugeHelp 验证类型化 gauge 入口三态
+// 写出的数值与 help 文本约定一致（0=closed 1=half_open 2=open，#69）。
+func TestObserveBreakerState_TypedMatchesGaugeHelp(t *testing.T) {
+	cases := []struct {
+		name  string
+		state CircuitState
+		want  float64
+	}{
+		{"closed", CircuitStateClosed, 0},
+		{"half_open", CircuitStateHalfOpen, 1},
+		{"open", CircuitStateOpen, 2},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			m, _ := newTestMetrics()
+			m.ObserveBreakerStateTyped("svc", "httpx", c.state)
+			if got := testutil.ToFloat64(m.breakerState.WithLabelValues("svc", "httpx")); got != c.want {
+				t.Fatalf("ObserveBreakerStateTyped(%v) gauge=%v, want %v", c.state, got, c.want)
+			}
+		})
+	}
+}
+
+// TestObserveBreakerState_LegacyShimMatchesTyped 验证历史 int 入口与类型化
+// 入口在合法域产出完全一致的 gauge 值（迁移前后指标不变的向后兼容判据）。
+func TestObserveBreakerState_LegacyShimMatchesTyped(t *testing.T) {
+	for _, s := range []int{0, 1, 2} {
+		mTyped, _ := newTestMetrics()
+		mTyped.ObserveBreakerStateTyped("svc", "httpx", CircuitState(s))
+		mLegacy, _ := newTestMetrics()
+		mLegacy.ObserveBreakerState("svc", "httpx", s)
+		got := testutil.ToFloat64(mLegacy.breakerState.WithLabelValues("svc", "httpx"))
+		want := testutil.ToFloat64(mTyped.breakerState.WithLabelValues("svc", "httpx"))
+		if got != want {
+			t.Fatalf("ObserveBreakerState(%d) gauge=%v, ObserveBreakerStateTyped gauge=%v，两入口不得分叉", s, got, want)
+		}
+	}
+}
+
+// TestObserveBreakerState_IllegalIntFallsLoud 验证 gauge 入口不再把裸 int
+// 原样写入（#69）：非法值 fail-loud——stderr WARN 可观测 + gauge 归 2
+// （= CircuitStateOpen，宁可假警报，不谎报健康，#66 同款）。
+func TestObserveBreakerState_IllegalIntFallsLoud(t *testing.T) {
+	m, _ := newTestMetrics()
+	out := captureStderr(t, func() {
+		m.ObserveBreakerState("svc", "httpx", 7) // 7 非法 → gauge 归 2
+	})
+	if got := testutil.ToFloat64(m.breakerState.WithLabelValues("svc", "httpx")); got != 2 {
+		t.Fatalf("ObserveBreakerState 非法 int gauge=%v, want 2（fail-loud 兜底，#69）", got)
+	}
+	if !strings.Contains(out, "7") || !strings.Contains(out, "WARN") {
+		t.Fatalf("stderr WARN 必须包含非法值 7 与 WARN 标记，got: %q", out)
+	}
+
+	// 类型化入口的非法强转同样 fail-loud。
+	m2, _ := newTestMetrics()
+	out = captureStderr(t, func() {
+		m2.ObserveBreakerStateTyped("svc", "httpx", CircuitState(99))
+	})
+	if got := testutil.ToFloat64(m2.breakerState.WithLabelValues("svc", "httpx")); got != 2 {
+		t.Fatalf("ObserveBreakerStateTyped 非法强转 gauge=%v, want 2（fail-loud 兜底，#69）", got)
+	}
+	if !strings.Contains(out, "99") || !strings.Contains(out, "WARN") {
+		t.Fatalf("stderr WARN 必须包含非法值 99 与 WARN 标记，got: %q", out)
+	}
+
+	// 合法值绝不产生 WARN（避免热路径噪音）。
+	out = captureStderr(t, func() {
+		m.ObserveBreakerState("svc", "httpx", 0)
+		m.ObserveBreakerState("svc", "httpx", 1)
+		m.ObserveBreakerState("svc", "httpx", 2)
+		m.ObserveBreakerStateTyped("svc", "httpx", CircuitStateOpen)
+	})
+	if out != "" {
+		t.Fatalf("合法值不得产生 stderr WARN，got: %q", out)
+	}
+}
+
+// TestObserveTransitionTyped_RefreshesGaugeWithoutWarn 钉住内部链路：类型化
+// 迁移入口刷 gauge 走 ObserveBreakerStateTyped，合法状态下零 WARN、数值正确。
+func TestObserveTransitionTyped_RefreshesGaugeWithoutWarn(t *testing.T) {
+	m, _ := newTestMetrics()
+	out := captureStderr(t, func() {
+		m.ObserveTransitionTyped("svc", "httpx", CircuitStateClosed, CircuitStateOpen)
+	})
+	if got := testutil.ToFloat64(m.breakerState.WithLabelValues("svc", "httpx")); got != 2 {
+		t.Fatalf("ObserveTransitionTyped 后 gauge=%v, want 2", got)
+	}
+	if out != "" {
+		t.Fatalf("类型化迁移入口不得产生 stderr WARN，got: %q", out)
+	}
+}
+
 // captureStderr 换入临时文件的 os.Stderr 执行 fn，返回期间写出的全部 stderr
 // 文本（fmt.Fprintf(os.Stderr,…) 在调用时取包级变量，换入即生效）。
 func captureStderr(t *testing.T, fn func()) string {
