@@ -285,12 +285,16 @@ func registerReuse[T prom.Collector](reg prom.Registerer, fresh T) T {
 				// CounterVec，或两个子系统共享 Registry 撞名。此前 here 是硬断言
 				// panic——Registry 是进程级共享面，撞名是运行期组合态而非启动
 				// 期配置错误，一个子系统炸死整个进程不成比例。降级为可观测：
-				// 新建独立实例照常返回（指标多一套同名不同型的时间序列，
-				// Prometheus 注册面仍有旧的那套），让调用方继续跑、在监控里
-				// 看到「两套序列」后再修命名——对齐「其余错误仍 panic」的边界：
-				// Register 的其它错误（Registry 不可用等）依旧 panic。
+				// 新建独立实例照常返回。注意降级实例**从未注册进 Registry**
+				// （Register 已经失败，fresh 不在任何抓取面上）：写它的指标是
+				// **指标黑洞**，监控里不会出现第二套序列——唯一信号是本条
+				// stderr WARN（#73 更正叙事：此前「指标多一套同名不同型的
+				// 时间序列、监控里看到两套再修」的说法失实，掩盖了数据丢失面）。
+				// 排障请按 WARN 立即改 namespace 或统一类型，恢复正常注册路径。
+				// 对齐「其余错误仍 panic」的边界：Register 的其它错误
+				// （Registry 不可用等）依旧 panic。
 				fmt.Fprintf(os.Stderr,
-					"[metrics] WARN: 同名 collector 类型不符，已降级为独立实例（不与既有序列复用）："+
+					"[metrics] WARN: 同名 collector 类型不符，降级实例未注册进 Registry（写入不进任何抓取面，该实例指标黑洞）："+
 						"已注册 %T，请求 %T——请改用同一类型的同名指标或换 namespace\n",
 					are.ExistingCollector, fresh)
 				return fresh
