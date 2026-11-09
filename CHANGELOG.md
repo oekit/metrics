@@ -1,3 +1,9 @@
+## [v0.2.1] — 2026-11-10
+
+- - docs(resilience): registerReuse 降级叙事更正——fresh 未注册、写入进不了任何抓取面（指标黑洞），WARN 文案同步（#73）
+
+关联问题单：metrics#73。
+
 ## [v0.2.0] — 2026-11-09
 
 - feat(resilience): ObserveBreakerStateTyped 类型化入口——非法值 fail-loud（#69）
