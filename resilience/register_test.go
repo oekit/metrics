@@ -163,3 +163,70 @@ func TestNewMetrics_NilRegFallsBackToPlatformRegistry(t *testing.T) {
 		}
 	}
 }
+
+// TestRegisterReuse_TypeMismatch_DegradeInstanceNotRegistered 回归测试（#73）：
+// 钉住类型不符降级路径的**真实语义**——Register 已经失败，fresh 从未进入
+// Registry、不在任何抓取面上，写降级实例的指标是「指标黑洞」，监控里不会
+// 出现第二套序列。此前注释/CHANGELOG 宣称「指标多一套同名不同型的时间
+// 序列（Prometheus 注册面仍有旧的那套）」，与实现相悖：运维按「监控里看到
+// 两套再修」的预期排查，永远看不到第二套，误以为指标已采集。本测试把
+// 更正后的叙事焊死在实现上：降级实例可写（不 panic），但 Gather 面上只有
+// 既有 collector，看不到降级实例写出的任何序列；WARN 文案如实说明黑洞。
+func TestRegisterReuse_TypeMismatch_DegradeInstanceNotRegistered(t *testing.T) {
+	reg := prom.NewRegistry()
+	// 同名同描述符，但既有类型是 CounterVec，请求的是 GaugeVec。
+	reg.MustRegister(prom.NewCounterVec(prom.CounterOpts{
+		Name:      "breaker_state",
+		Namespace: "resilience",
+		Help:      "Circuit breaker state: 0=closed 1=half_open 2=open.",
+	}, []string{"service", "kind"}))
+
+	// stderr WARN 捕获（口径同 TestRegisterReuse_TypeMismatch_DegradesObservably）
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldStderr := os.Stderr
+	os.Stderr = w
+
+	got := registerReuse(reg, prom.NewGaugeVec(prom.GaugeOpts{
+		Name:      "breaker_state",
+		Namespace: "resilience",
+		Help:      "Circuit breaker state: 0=closed 1=half_open 2=open.",
+	}, []string{"service", "kind"}))
+
+	w.Close()
+	os.Stderr = oldStderr
+	var warnBuf strings.Builder
+	sc := bufio.NewScanner(r)
+	for sc.Scan() {
+		warnBuf.WriteString(sc.Text())
+	}
+
+	if got == nil {
+		t.Fatal("降级路径必须返回可用实例")
+	}
+	// 降级实例可写（调用方继续跑，不 panic）
+	got.WithLabelValues("svc-b", "kind-b").Set(7)
+
+	// 但写入不进任何抓取面（#73）：Gather 面上不得出现降级实例的任何序列
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mf := range mfs {
+		for _, mt := range mf.GetMetric() {
+			for _, lp := range mt.GetLabel() {
+				if lp.GetName() == "service" && lp.GetValue() == "svc-b" {
+					t.Fatalf("降级实例的写入出现在抓取面上——降级实例应未注册（指标黑洞，#73）: %s", mf.GetName())
+				}
+			}
+		}
+	}
+
+	// WARN 文案如实描述黑洞（#73 更正后的叙事）
+	warn := warnBuf.String()
+	if !strings.Contains(warn, "未注册") || !strings.Contains(warn, "指标黑洞") {
+		t.Fatalf("WARN 应如实说明降级实例未注册/指标黑洞: %s", warn)
+	}
+}
