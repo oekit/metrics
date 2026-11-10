@@ -1,3 +1,10 @@
+## [v0.2.4] — 2026-11-11
+
+- fix(metrics): Init 撞名从 panic 降级为「幂等跳过/复用 + 方向正确的 stderr WARN」，注册失败后重调 Init 不再静默空转（#90）——导出变量（BuildInfo/StartTimeSeconds）被消费方在 Init 前自行注册进 Registry 或 Registry 已有同名 collector 时，旧版 `MustRegister` 直接 panic「duplicate metrics collector registration attempted」炸启动，而 sync.Once 语义下 panic 即算完成：recover 后重调 Init 整体跳过注册，app_build_info/app_start_time_seconds 永久缺失、go/process collector 卡在半注册态，唯一线索还是一条指错方向的 service WARN。修复口径：① 注册改走 Register + 显式处置——同实例已在 Registry 上幂等跳过（初始值照常写）、同名同描述符复用既有实例（resilience.registerReuse 同款哲学：BuildInfo/StartTimeSeconds 初始值写进抓取面上的实例，app_build_info 不缺席；go/process collector 序列等价直接跳过），偏离默认态各打一行指对方向的 stderr WARN，同名异型降级 WARN + 跳过写值；非撞名错误（同名不同形状等）显式 panic；② Once 换 **sync.OnceFunc**（Go 1.21+ 现代特性）：f panic 后后续每次 Init 都重炸同一 panic 值——失败可观测、契约明确（修 Registry 冲突后重启进程），「panic 后 Once-done 静默空转」整类消灭；③ service 名首调即定改为 Init 内 `currentService.CompareAndSwap`（OnceFunc 的 f 无参），#49 的 WARN 文案与语义逐字不变
+- docs(metrics): doc.go 的 build.sh 注入指令改指真实注入面 `github.com/oekit/core/version` 并补全四个符号（#89）——原指令 `-X github.com/oekit/metrics/version.BuildCommit=...` 指向不存在的子包（真符号在 core/version，本包 Init 即 import 它），go tool link 对指向不存在符号的 -X **静默丢弃**（exit 0 零线索），app_build_info 的 commit/branch/build_time 恒 "unknown"，按 commit 聚合的发布核对/回滚判断/灰度对比全部失真。MOD 改为 `github.com/oekit/core`，Version/BuildCommit/BuildBranch/BuildTime 四符号逐一核对（core v0.14.0），并加防漂移钉子测试（符号改名/删除即刻编译红）
+
+关联问题单：metrics#90、metrics#89。
+
 ## [v0.2.3] — 2026-11-10
 
 - - build: 依赖地板对齐（第二轮发版后 floor sync，无代码变更）

@@ -1,7 +1,7 @@
 # AGENTS.md — oekit/metrics
 
-> Prometheus 门面 + 弹性指标族
-> 当前版本：`v0.2.2` · module：`github.com/oekit/metrics` · org：[oekit = Open Easy Kit](https://oekit.github.io)
+> Prometheus 门面 + 弹性指标族；v0.2.4 起 Init 撞名幂等容忍（同实例跳过 / 同名同型复用既有实例 / 异型 stderr WARN 降级，非撞名注册错误 panic 且经 sync.OnceFunc 每次重炸——注册失败绝不静默空转），构建元数据注入面 = `github.com/oekit/core/version` 四符号（Version/BuildCommit/BuildBranch/BuildTime，doc.go build.sh 指令已对齐）
+> 当前版本：`v0.2.4` · module：`github.com/oekit/metrics` · org：[oekit = Open Easy Kit](https://oekit.github.io)
 
 ## 本仓包含
 `./`、`resilience/`

@@ -8,7 +8,7 @@
 ## 安装
 
 ```bash
-go get github.com/oekit/metrics@v0.2.2
+go get github.com/oekit/metrics@v0.2.4
 ```
 
 ## 这个仓库做什么
