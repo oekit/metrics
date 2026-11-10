@@ -21,10 +21,16 @@
 //
 // # build.sh 改动
 //
-// 所有服务改为注入 ekit/version 包的变量：
+// 构建元数据符号在 github.com/oekit/core/version（本包 Init 读同一组变量
+// 生成 app_build_info），build.sh 注入时 MOD 必须指向 core——此前指向
+// ${MOD}/version（metrics 下不存在该子包）时，go tool link 对指向不存在
+// 符号的 -X 静默丢弃（exit 0 零线索），app_build_info 恒为 "unknown"（#89）：
 //
-//	MOD="github.com/oekit/metrics"
-//	LDFLAGS="-X ${MOD}/version.BuildCommit=${GIT_COMMIT} ..."
+//	MOD="github.com/oekit/core"
+//	LDFLAGS="-X ${MOD}/version.Version=${VERSION} \
+//	         -X ${MOD}/version.BuildCommit=${GIT_COMMIT} \
+//	         -X ${MOD}/version.BuildBranch=${GIT_BRANCH} \
+//	         -X ${MOD}/version.BuildTime=${BUILD_TIME}"
 //
 // # 自定义 Registry
 //
