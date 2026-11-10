@@ -1,3 +1,7 @@
+## [v0.2.2] — 2026-11-10
+
+- - build: 依赖地板对齐——core v0.13.5 → v0.13.6（floor sync，无代码变更）
+
 ## [v0.2.1] — 2026-11-10
 
 - - docs(resilience): registerReuse 降级叙事更正——fresh 未注册、写入进不了任何抓取面（指标黑洞），WARN 文案同步（#73）
