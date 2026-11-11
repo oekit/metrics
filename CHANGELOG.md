@@ -1,3 +1,12 @@
+## [v0.3.0] — 2026-11-12
+
+- feat(metrics): 导出泛型 RegisterReuse[T prom.Collector]——httpx mustRegisterReuse / middleware registerReuse 同款泛型逐字重复的全矩阵单源（#100，治本落点在本仓）：同名重复注册复用既有实例（抑制重复注册），同名异型 panic 带归属前缀的人话文案（既有类型 vs 请求类型 + 怎么改），其余注册错误 panic（MustRegister 边界）；文案前缀经 WithReuseOwner 透传（空串回退默认 "metrics"），godoc 写明 httpx/middleware wave 切换用法——两仓消费方后续 wave 切换，本版只落单源
+- refactor(metrics): registerBuildInfo/registerStartTime 两份 25 行复制粘贴收敛为泛型内核 registerTolerant[T prom.Collector]（同实例幂等/同型复用+WARN/异型降级/其余上抛，语义逐字节不变），异型文案的「请求类型」改经 reflect.TypeFor[T]() 从类型参数推导，不再手拼（#99）
+- refactor(metrics): 全仓 10 处内联 stderr WARN（根包 6 处 + resilience 子包 4 处）收敛为 internal/warn.Warnf 单点——自动补 "[metrics] WARN: " 前缀与换行，格式漂移只可能发生在这一处；「导出变量不在抓取面 = 指标黑洞」承诺措辞收敛为常量 warnBlackHoleTail（#101）
+- build: Go 地板 1.24.0 → 1.26.0（org 全矩阵统一），ci.yml go-version 改 '1.26'（job 名不变）
+
+关联问题单：metrics#99、metrics#100、metrics#101。
+
 ## [v0.2.4] — 2026-11-11
 
 - fix(metrics): Init 撞名从 panic 降级为「幂等跳过/复用 + 方向正确的 stderr WARN」，注册失败后重调 Init 不再静默空转（#90）——导出变量（BuildInfo/StartTimeSeconds）被消费方在 Init 前自行注册进 Registry 或 Registry 已有同名 collector 时，旧版 `MustRegister` 直接 panic「duplicate metrics collector registration attempted」炸启动，而 sync.Once 语义下 panic 即算完成：recover 后重调 Init 整体跳过注册，app_build_info/app_start_time_seconds 永久缺失、go/process collector 卡在半注册态，唯一线索还是一条指错方向的 service WARN。修复口径：① 注册改走 Register + 显式处置——同实例已在 Registry 上幂等跳过（初始值照常写）、同名同描述符复用既有实例（resilience.registerReuse 同款哲学：BuildInfo/StartTimeSeconds 初始值写进抓取面上的实例，app_build_info 不缺席；go/process collector 序列等价直接跳过），偏离默认态各打一行指对方向的 stderr WARN，同名异型降级 WARN + 跳过写值；非撞名错误（同名不同形状等）显式 panic；② Once 换 **sync.OnceFunc**（Go 1.21+ 现代特性）：f panic 后后续每次 Init 都重炸同一 panic 值——失败可观测、契约明确（修 Registry 冲突后重启进程），「panic 后 Once-done 静默空转」整类消灭；③ service 名首调即定改为 Init 内 `currentService.CompareAndSwap`（OnceFunc 的 f 无参），#49 的 WARN 文案与语义逐字不变
