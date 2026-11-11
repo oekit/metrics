@@ -2,13 +2,13 @@ package metrics
 
 import (
 	"errors"
-	"fmt"
-	"os"
 	"runtime"
 	"sync"
 	"sync/atomic"
 
 	"github.com/oekit/core/version"
+
+	"github.com/oekit/metrics/internal/warn"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
@@ -87,10 +87,9 @@ func Init(serviceName string) {
 		// stderr WARN 与 resilience.registerReuse 的降级 WARN 同款手法：
 		// 本仓不引 logx——metrics 是矩阵底层仓（httpx/middleware/hertz/kitex
 		// 均依赖），为零频次的启动期误用告警增加日志门面依赖不值。
-		fmt.Fprintf(os.Stderr,
-			"[metrics] WARN: Init(%q) 与首次调用生效的 service=%q 不一致，本次参数被忽略"+
-				"——app_build_info{service} 仍是首次值，按 service 聚合的看板/告警会错标；"+
-				"如需更名请重启进程\n",
+		warn.Warnf("Init(%q) 与首次调用生效的 service=%q 不一致，本次参数被忽略"+
+			"——app_build_info{service} 仍是首次值，按 service 聚合的看板/告警会错标；"+
+			"如需更名请重启进程",
 			serviceName, effective)
 	}
 }
@@ -141,82 +140,28 @@ func registerStateless(reg prometheus.Registerer, fresh prometheus.Collector, wh
 		if !errors.As(err, &are) {
 			return err
 		}
-		fmt.Fprintf(os.Stderr,
-			"[metrics] WARN: Init 跳过内置 %s——Registry 已有同名 collector（%T）占位，"+
-				"序列以既有实例供给；如需内置版本请勿预注册同名指标\n",
+		warn.Warnf("Init 跳过内置 %s——Registry 已有同名 collector（%T）占位，"+
+			"序列以既有实例供给；如需内置版本请勿预注册同名指标",
 			what, are.ExistingCollector)
 	}
 	return nil
 }
 
-// registerBuildInfo 注册导出变量 BuildInfo，撞名容忍（#90，registerReuse
-// 同款哲学）：
-//   - 既有实例就是 BuildInfo 本身（消费方预注册导出变量的合法路径）→
-//     幂等返回 BuildInfo，初始值照常写（写的就是抓取面上的同一实例）；
-//   - 同名同描述符的其它 *GaugeVec → 复用既有实例返回（与 registerReuse
-//     的复用语义一致，app_build_info 不缺席），stderr WARN 指明导出变量
-//     metrics.BuildInfo 不在抓取面上——后续直接写导出变量是指标黑洞
-//     （#73 叙事）；
-//   - 异型（同名不同类型）→ 降级 stderr WARN，返回 nil：初始值写值跳过，
-//     app_build_info 序列以既有实现供给。
-//
-// 其余错误（同名不同形状等）原样上抛。
+// registerBuildInfo 注册导出变量 BuildInfo，撞名容忍契约与共享内核见
+// registerTolerant（#90/#99：两函数此前是 25 行复制粘贴，收敛后各自退化为
+// 一个带泛型实例化与文案参数的薄封装）。异型降级返回 nil：初始值写值跳过，
+// app_build_info 序列以既有实现供给。
 func registerBuildInfo(reg prometheus.Registerer) (*prometheus.GaugeVec, error) {
-	if err := reg.Register(BuildInfo); err != nil {
-		var are prometheus.AlreadyRegisteredError
-		if !errors.As(err, &are) {
-			return nil, err
-		}
-		if are.ExistingCollector == BuildInfo {
-			return BuildInfo, nil
-		}
-		existing, ok := are.ExistingCollector.(*prometheus.GaugeVec)
-		if !ok {
-			fmt.Fprintf(os.Stderr,
-				"[metrics] WARN: app_build_info 撞名异型（已注册 %T，请求 *prometheus.GaugeVec），"+
-					"降级跳过：Init 不写初始值，app_build_info 序列以既有实现供给；"+
-					"导出变量 metrics.BuildInfo 不在抓取面上，直接写它是指标黑洞\n",
-				are.ExistingCollector)
-			return nil, nil
-		}
-		fmt.Fprintf(os.Stderr,
-			"[metrics] WARN: Registry 已有同名同型的 app_build_info（非导出变量本身），"+
-				"Init 复用既有实例写初始值；导出变量 metrics.BuildInfo 不在抓取面上，"+
-				"直接写它是指标黑洞\n")
-		return existing, nil
-	}
-	return BuildInfo, nil
+	return registerTolerant(reg, BuildInfo, "app_build_info", "metrics.BuildInfo")
 }
 
 // registerStartTime 注册导出变量 StartTimeSeconds，撞名容忍语义与
-// registerBuildInfo 完全同款（#90），契约见彼处。注意 Gauge 是接口而
-// 非 *GaugeVec 那样的具体结构（NewGauge 的实现类型不导出）——同型判定
-// 用 prometheus.Gauge 接口断言，初始值也经接口写入。
+// registerBuildInfo 完全同款（#90），共享内核见 registerTolerant。注意
+// Gauge 是接口而非 *GaugeVec 那样的具体结构（NewGauge 的实现类型不导出）
+// ——泛型实例化 T = prometheus.Gauge 接口类型，同型判定与初始值写值都经
+// 接口完成。
 func registerStartTime(reg prometheus.Registerer) (prometheus.Gauge, error) {
-	if err := reg.Register(StartTimeSeconds); err != nil {
-		var are prometheus.AlreadyRegisteredError
-		if !errors.As(err, &are) {
-			return nil, err
-		}
-		if are.ExistingCollector == StartTimeSeconds {
-			return StartTimeSeconds, nil
-		}
-		existing, ok := are.ExistingCollector.(prometheus.Gauge)
-		if !ok {
-			fmt.Fprintf(os.Stderr,
-				"[metrics] WARN: app_start_time_seconds 撞名异型（已注册 %T，请求 prometheus.Gauge），"+
-					"降级跳过：Init 不写初始值，app_start_time_seconds 序列以既有实现供给；"+
-					"导出变量 metrics.StartTimeSeconds 不在抓取面上，直接写它是指标黑洞\n",
-				are.ExistingCollector)
-			return nil, nil
-		}
-		fmt.Fprintf(os.Stderr,
-			"[metrics] WARN: Registry 已有同名同型的 app_start_time_seconds（非导出变量本身），"+
-				"Init 复用既有实例写初始值；导出变量 metrics.StartTimeSeconds 不在抓取面上，"+
-				"直接写它是指标黑洞\n")
-		return existing, nil
-	}
-	return StartTimeSeconds, nil
+	return registerTolerant(reg, StartTimeSeconds, "app_start_time_seconds", "metrics.StartTimeSeconds")
 }
 
 // CurrentService 返回当前生效的 service 名，即首次 Init 传入的名字。

@@ -13,9 +13,9 @@ package resilience
 import (
 	"errors"
 	"fmt"
-	"os"
 
 	"github.com/oekit/metrics"
+	"github.com/oekit/metrics/internal/warn"
 	prom "github.com/prometheus/client_golang/prometheus"
 )
 
@@ -64,8 +64,7 @@ func (s CircuitState) String() string {
 	case CircuitStateOpen:
 		return "open"
 	default:
-		fmt.Fprintf(os.Stderr,
-			"[metrics] WARN: CircuitState.String() 收到非法状态值 %d（合法域 0/1/2），标签按 open 兜底（fail-loud，#66）\n",
+		warn.Warnf("CircuitState.String() 收到非法状态值 %d（合法域 0/1/2），标签按 open 兜底（fail-loud，#66）",
 			int(s))
 		return "open"
 	}
@@ -113,8 +112,7 @@ var (
 func CircuitStateFromInt(state int) CircuitState {
 	cs, err := CircuitStateFromIntChecked(state)
 	if err != nil {
-		fmt.Fprintf(os.Stderr,
-			"[metrics] WARN: CircuitStateFromInt 收到非法状态值 %d，按 open 兜底（fail-loud，#66）：%v\n",
+		warn.Warnf("CircuitStateFromInt 收到非法状态值 %d，按 open 兜底（fail-loud，#66）：%v",
 			state, err)
 		return CircuitStateOpen
 	}
@@ -213,8 +211,7 @@ func NewMetrics(reg prom.Registerer, namespace string) *Metrics {
 func (m *Metrics) ObserveBreakerStateTyped(service, kind string, state CircuitState) {
 	cs, err := CircuitStateFromIntChecked(int(state))
 	if err != nil {
-		fmt.Fprintf(os.Stderr,
-			"[metrics] WARN: ObserveBreakerStateTyped 收到非法状态值 %d，gauge 按 open 兜底（fail-loud，#69）：%v\n",
+		warn.Warnf("ObserveBreakerStateTyped 收到非法状态值 %d，gauge 按 open 兜底（fail-loud，#69）：%v",
 			int(state), err)
 		cs = CircuitStateOpen
 	}
@@ -293,9 +290,8 @@ func registerReuse[T prom.Collector](reg prom.Registerer, fresh T) T {
 				// 排障请按 WARN 立即改 namespace 或统一类型，恢复正常注册路径。
 				// 对齐「其余错误仍 panic」的边界：Register 的其它错误
 				// （Registry 不可用等）依旧 panic。
-				fmt.Fprintf(os.Stderr,
-					"[metrics] WARN: 同名 collector 类型不符，降级实例未注册进 Registry（写入不进任何抓取面，该实例指标黑洞）："+
-						"已注册 %T，请求 %T——请改用同一类型的同名指标或换 namespace\n",
+				warn.Warnf("同名 collector 类型不符，降级实例未注册进 Registry（写入不进任何抓取面，该实例指标黑洞）："+
+					"已注册 %T，请求 %T——请改用同一类型的同名指标或换 namespace",
 					are.ExistingCollector, fresh)
 				return fresh
 			}
