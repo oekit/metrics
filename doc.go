@@ -34,8 +34,16 @@
 //
 // # 自定义 Registry
 //
-// 使用独立的 Registry 避免与全局 prometheus.DefaultRegistry 冲突：
+// 使用独立的 Registry 避免与全局 prometheus.DefaultRegisterer 冲突（#106：
+// client_golang 导出的是 DefaultRegisterer / DefaultGatherer，不存在
+// DefaultRegistry 变量——读者照抄旧文档进代码即编译失败）：
 //
 //	registry := metrics.Registry
 //	// 传给 middleware.NewPrometheusMetrics 或 hertz.MetricsHandlerFor
+//
+// 或自建全新 Registry（与包级 Registry 完全隔离，抓取端自行接线）：
+//
+//	reg := prometheus.NewRegistry()
+//	reg.MustRegister(collectors.NewGoCollector())
+//	// 传给 middleware.NewPrometheusMetrics(reg, ...) 或 hertz.MetricsHandlerFor(reg)
 package metrics

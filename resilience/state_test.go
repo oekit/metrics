@@ -338,11 +338,13 @@ func TestCircuitStateFromInt_WarnsOnIllegal(t *testing.T) {
 		t.Fatalf("stderr WARN 必须包含非法值 7 与 WARN 标记，got: %q", out)
 	}
 
+	// #104 起 String 为纯函数：不再打印告警（fail-loud 收敛到 CircuitStateFromInt
+	// 等显式入口，由上一段与 TestCircuitStateString_IsPure_NoWarn 钉住）。
 	out = captureStderr(t, func() {
 		_ = CircuitState(99).String()
 	})
-	if !strings.Contains(out, "99") || !strings.Contains(out, "WARN") {
-		t.Fatalf("String() 非法值的 stderr WARN 必须包含 99 与 WARN 标记，got: %q", out)
+	if out != "" {
+		t.Fatalf("String() 必须是纯函数（#104），却产生 stderr 输出：%q", out)
 	}
 
 	// 合法值绝不产生 WARN（避免热路径噪音）。
@@ -354,5 +356,60 @@ func TestCircuitStateFromInt_WarnsOnIllegal(t *testing.T) {
 	})
 	if out != "" {
 		t.Fatalf("合法值不得产生 stderr WARN，got: %q", out)
+	}
+}
+
+// TestCircuitStateString_IsPure_NoWarn String 为纯函数（#104）：非法值重复
+// 调用不产生任何 stderr 输出。Stringer 会被 %v/panic dump/pprof 标签/调试器
+// 间接调用——副作用告警在非法值循环场景逐事件刷屏且无法关闭；fail-loud 已
+// 收敛到显式转换/打点入口（CircuitStateFromInt / ObserveBreakerStateTyped /
+// ObserveTransitionTyped，各自 WARN 语义不变）。标签兜底值 "open" 不变。
+func TestCircuitStateString_IsPure_NoWarn(t *testing.T) {
+	out := captureStderr(t, func() {
+		for range 1000 {
+			if got := CircuitState(99).String(); got != "open" {
+				t.Fatalf("CircuitState(99).String()=%q, want \"open\"", got)
+			}
+		}
+	})
+	if out != "" {
+		t.Fatalf("String() 必须是纯函数（#104），却产生 stderr 输出：%q", out)
+	}
+}
+
+// TestObserveTransitionTyped_InvalidFromWarns 显式打点入口承接 fail-loud
+// （#104）：from 非法时本入口打一行 WARN，counter 的 from 标签仍按 "open"
+// 兜底（宁可假警报，不谎报健康）；to 合法时无额外 WARN。
+func TestObserveTransitionTyped_InvalidFromWarns(t *testing.T) {
+	m, reg := newTestMetrics()
+	var out string
+	out = captureStderr(t, func() {
+		m.ObserveTransitionTyped("svc", "httpx", CircuitState(99), CircuitStateClosed)
+	})
+	if n := strings.Count(out, "[metrics] WARN:"); n != 1 {
+		t.Fatalf("非法 from 应告警恰好一次，got %d 次：%q", n, out)
+	}
+	if !strings.Contains(out, "非法 from 状态值 99") {
+		t.Fatalf("WARN 未指明非法 from 值：%q", out)
+	}
+	want := `# HELP test_breaker_state Circuit breaker state: 0=closed 1=half_open 2=open.
+# TYPE test_breaker_state gauge
+test_breaker_state{kind="httpx",service="svc"} 0
+# HELP test_breaker_transitions_total Total number of circuit breaker state transitions.
+# TYPE test_breaker_transitions_total counter
+test_breaker_transitions_total{from="open",kind="httpx",service="svc",to="closed"} 1
+`
+	if err := testutil.GatherAndCompare(reg, strings.NewReader(want),
+		"test_breaker_state", "test_breaker_transitions_total"); err != nil {
+		t.Fatalf("非法 from 的 counter 标签应按 open 兜底：%v", err)
+	}
+
+	// 合法迁移零告警（既有用例 TestObserveTransitionTyped_RefreshesGaugeWithoutWarn
+	// 的口径在 #104 之后保持不变）
+	out = captureStderr(t, func() {
+		m.ObserveTransitionTyped("svc", "httpx", CircuitStateClosed, CircuitStateOpen)
+	})
+	if out != "" {
+		t.Fatalf("合法迁移不得产生 WARN：%q", out)
 	}
 }

@@ -1,6 +1,8 @@
 package resilience
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 
 	prom "github.com/prometheus/client_golang/prometheus"
@@ -75,5 +77,72 @@ func TestNewMetrics_RegistryReuse(t *testing.T) {
 func TestNewMetrics_Defaults(t *testing.T) {
 	if NewMetrics(nil, "") == nil {
 		t.Fatal("expected non-nil metrics with defaults")
+	}
+}
+
+// —— 标签基数防护（#105）——
+
+// mustPanic 收编期望中的 fail-fast panic，返回 panic 值（非 panic 即失败）。
+func mustPanic(t *testing.T, what string, fn func()) (msg string) {
+	t.Helper()
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatalf("%s：期望 fail-fast panic，实际正常返回", what)
+		}
+		s, ok := r.(string)
+		if !ok {
+			t.Fatalf("%s：panic 值应为 string，got %T", what, r)
+		}
+		msg = s
+	}()
+	fn()
+	return
+}
+
+// TestNewMetrics_LabelLimitFailFast 超限新组合 fail-fast（#105 防护口径：
+// 上限经 WithLabelLimit 构造期配置，超限 panic 报错而非静默丢弃打点）。
+func TestNewMetrics_LabelLimitFailFast(t *testing.T) {
+	m := NewMetrics(prom.NewRegistry(), "probe", WithLabelLimit(2))
+
+	// breaker_state family：前 2 个新组合放行，第 3 个 panic
+	m.ObserveBreakerStateTyped("svc1", "httpx", CircuitStateClosed)
+	m.ObserveBreakerStateTyped("svc2", "httpx", CircuitStateClosed)
+	msg := mustPanic(t, "第 3 个组合", func() {
+		m.ObserveBreakerStateTyped("svc3", "httpx", CircuitStateClosed)
+	})
+	if !strings.Contains(msg, "breaker_state") || !strings.Contains(msg, "上限 2") {
+		t.Fatalf("panic 消息应携带 family 与上限，got: %s", msg)
+	}
+	// 已见组合在超限后照常放行（记账的是「新组合」，不是「写入次数」）
+	m.ObserveBreakerStateTyped("svc1", "httpx", CircuitStateOpen)
+
+	// 各 family 独立记账：breaker_state 已满，retry_attempts 仍有自己的预算
+	m.ObserveRetry("svc-fresh", "httpx")
+	m.ObserveRejected("svc-fresh", "httpx")
+
+	// transitions 按（service,kind,from,to) 全组合记账
+	m2 := NewMetrics(prom.NewRegistry(), "probe", WithLabelLimit(2))
+	m2.ObserveTransitionTyped("s", "httpx", CircuitStateClosed, CircuitStateOpen)
+	m2.ObserveTransitionTyped("s", "httpx", CircuitStateOpen, CircuitStateClosed)
+	mustPanic(t, "transitions 第 3 个组合", func() {
+		m2.ObserveTransitionTyped("s", "httpx", CircuitStateOpen, CircuitStateOpen)
+	})
+	// 已见组合重放不 panic
+	m2.ObserveTransitionTyped("s", "httpx", CircuitStateClosed, CircuitStateOpen)
+}
+
+// TestNewMetrics_LabelLimitDefaultFallback n<=0 与缺省构造回退
+// DefaultLabelLimit（nil/零值参数 = 显式回退默认值，总则②）：写满
+// DefaultLabelLimit 个组合不 panic，第 DefaultLabelLimit+1 个 panic。
+func TestNewMetrics_LabelLimitDefaultFallback(t *testing.T) {
+	for _, opts := range [][]MetricsOption{nil, {WithLabelLimit(0)}, {WithLabelLimit(-5)}, {nil}} {
+		m := NewMetrics(prom.NewRegistry(), "probe", opts...)
+		for i := 0; i < DefaultLabelLimit; i++ {
+			m.ObserveRetry(fmt.Sprintf("svc-%d", i), "httpx")
+		}
+		mustPanic(t, "超出缺省上限", func() {
+			m.ObserveRetry(fmt.Sprintf("svc-%d", DefaultLabelLimit), "httpx")
+		})
 	}
 }

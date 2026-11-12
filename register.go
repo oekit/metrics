@@ -70,7 +70,15 @@ func WithReuseOwner(owner string) RegisterReuseOption {
 // 需要撞名**降级**（异型不 panic、WARN 可观测）的容忍语义是另一族：本仓根包
 // Init 的 registerTolerant 与 resilience 子包的 registerReuse——不要用本函数
 // 承载容忍场景，语义边界见各处 godoc。
+//
+// reg 为 nil 时回退到包级 metrics.Registry（#109，「nil 参数 = 显式回退默认值」
+// 总则②）——与姊妹 API resilience.NewMetrics 的 nil 回退同一处（平台 /metrics
+// 端点暴露的自定义 registry）。此前 nil 直接对 nil 接口调用 Register ⇒ SIGSEGV
+// panic：既不是回退默认值，也不是构造期 fail-fast，而是第一次使用时的裸崩。
 func RegisterReuse[T prometheus.Collector](reg prometheus.Registerer, fresh T, opts ...RegisterReuseOption) T {
+	if reg == nil {
+		reg = Registry
+	}
 	if err := reg.Register(fresh); err != nil {
 		var are prometheus.AlreadyRegisteredError
 		if errors.As(err, &are) {
