@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	prom "github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 // errRegisterer 是非撞名错误的注册器桩：Register 返回自带错误（不是
@@ -152,5 +153,36 @@ func TestRegisterStartTime_ForeignOtherType_DegradesWithWarn(t *testing.T) {
 	}
 	if !blackHoleSeen {
 		t.Fatalf("异型 WARN 应含收敛后的指标黑洞固定尾巴，got %v", lines)
+	}
+}
+
+// TestRegisterReuse_NilRegistererFallsBackToRegistry nil Registerer 回退包级
+// metrics.Registry（#109，「nil 参数 = 显式回退默认值」总则②）——此前 nil
+// 直接对 nil 接口调用 Register ⇒ SIGSEGV panic，既不是回退默认值也不是
+// 构造期 fail-fast。回退目标与姊妹 API resilience.NewMetrics 的 nil 回退
+// 同一处（平台 /metrics 端点暴露的 registry）。
+func TestRegisterReuse_NilRegistererFallsBackToRegistry(t *testing.T) {
+	vec := prom.NewGaugeVec(prom.GaugeOpts{
+		Name: "probe_nilreg_total",
+		Help: "nil registerer fallback probe (#109)",
+	}, []string{"l"})
+	got := RegisterReuse[prom.Gauge](nil, vec.WithLabelValues("a"))
+	if got == nil {
+		t.Fatal("nil reg 应回退默认 registry 并正常返回 collector")
+	}
+	got.Set(42)
+	// 确认真落在 metrics.Registry（Gather 可见、值为 42）
+	want := `# HELP probe_nilreg_total nil registerer fallback probe (#109)
+# TYPE probe_nilreg_total gauge
+probe_nilreg_total{l="a"} 42
+`
+	if err := testutil.GatherAndCompare(Registry, strings.NewReader(want), "probe_nilreg_total"); err != nil {
+		t.Fatalf("collector 未落进 metrics.Registry：%v", err)
+	}
+
+	// 同名再次以 nil reg 注册 → 走撞名复用路径返回既有实例（回退后语义不变）
+	got2 := RegisterReuse[prom.Gauge](nil, vec.WithLabelValues("b"))
+	if got2 != got {
+		t.Fatal("同名重复注册应复用既有实例（RegisterReuse 语义在回退路径保持）")
 	}
 }

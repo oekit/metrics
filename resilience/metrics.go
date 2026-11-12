@@ -8,11 +8,18 @@
 //   - from/to: 熔断状态迁移端点（closed/half_open/open，固定有限集）
 //
 // 禁止将实例地址、方法名等高基数来源作为标签。
+//
+// 基数防护（#105）：每个指标 family 的标签组合数有运行期上限（缺省
+// DefaultLabelLimit，NewMetrics 的 WithLabelLimit 可调）——超限的新组合在
+// 首次写入时 fail-fast panic（fail-fast 而非静默丢弃：静默丢打点同样让
+// 指标说谎），高基数误用不会无界增长。
 package resilience
 
 import (
 	"errors"
 	"fmt"
+	"strings"
+	"sync"
 
 	"github.com/oekit/metrics"
 	"github.com/oekit/metrics/internal/warn"
@@ -49,12 +56,16 @@ const (
 // String 返回该状态写入 Prometheus label 的标签值。
 //
 // 合法取值（三个枚举常量）映射 closed / half_open / open。非法取值（未受
-// 构造约束的强转，如 CircuitState(99)）不再静默归 "closed"——closed 是
-// 「健康」标签，把非法值伪装成它正是 #39 要消灭、#66 复发的「指标说谎」
-// （熔断器已 open，指标恒记 closed，值班看到的告警面失真）。非法值降级为
-// fail-loud：stderr WARN 可观测（同 registerReuse 的降级 WARN 先例）+
-// 标签归 "open"（宁可假警报，不谎报健康）。需要 error 的判定走
-// BreakerValue / CircuitStateFromIntChecked（非法值返回 ErrInvalidState）。
+// 构造约束的强转，如 CircuitState(99)）不静默归 "closed"——closed 是
+// 「健康」标签，把非法值伪装成它正是 #39 要消灭、#66 复发的「指标说谎」；
+// 标签归 "open"（宁可假警报，不谎报健康）。
+//
+// 本方法为**纯函数**（#104）：不再打印 stderr 告警。Stringer 会被 %v、
+// panic dump、pprof 标签、调试器间接调用——String 里做 I/O 副作用，消费方
+// 循环传非法态时告警逐事件刷屏且无法关闭。fail-loud 告警收敛到**显式转换/
+// 打点入口**：CircuitStateFromInt / ObserveBreakerStateTyped /
+// ObserveTransitionTyped（各自对非法值的 WARN 语义不变）。需要 error 的
+// 判定走 BreakerValue / CircuitStateFromIntChecked（非法值返回 ErrInvalidState）。
 func (s CircuitState) String() string {
 	switch s {
 	case CircuitStateClosed:
@@ -64,8 +75,6 @@ func (s CircuitState) String() string {
 	case CircuitStateOpen:
 		return "open"
 	default:
-		warn.Warnf("CircuitState.String() 收到非法状态值 %d（合法域 0/1/2），标签按 open 兜底（fail-loud，#66）",
-			int(s))
 		return "open"
 	}
 }
@@ -145,17 +154,89 @@ func StateName(state int) string {
 	return CircuitStateFromInt(state).String()
 }
 
+// DefaultLabelLimit 单 collector family 的标签组合（child）数缺省上限（#105）。
+//
+// 本族指标的合法标签（service/kind/from/to）都是受控低基数域——真实组合数
+// 在十的量级；1024 对任何健康用法都是宽裕上界，同时把「请求 ID/实例地址这类
+// 高基数来源被误作标签」的爆炸限制在千级（而非无界增长到内存泄漏 + /metrics
+// 爆序列）。
+const DefaultLabelLimit = 1024
+
+// MetricsOption 是 NewMetrics 的函数选项（XxxOption 命名，AGENTS 硬规则）。
+type MetricsOption func(*metricsConfig)
+
+type metricsConfig struct {
+	labelLimit int
+}
+
+// WithLabelLimit 定制单 collector family 的标签组合（child）数上限（#105）。
+// n <= 0 回退缺省 DefaultLabelLimit（nil/零值参数 = 显式回退默认值，总则②）。
+//
+// 防护口径：每个 family（breaker_state/breaker_transitions/breaker_rejected/
+// retry_attempts）独立记账；新标签组合首次写入时若已超限，**fail-fast panic**
+// ——高基数来源（实例地址、请求 ID、方法名）作标签会让 prometheus child map
+// 永久增长（内存泄漏 + /metrics 爆序列），这是构造/配置层面的错误信号，静默
+// 丢弃打点等于「指标说谎」的软柿子（本仓 #39/#66 反复清剿的形态）。panic 消息
+// 携带 family、上限与本次组合，按消息改标签来源或用本选项调整上限。
+func WithLabelLimit(n int) MetricsOption {
+	return func(c *metricsConfig) {
+		if n > 0 {
+			c.labelLimit = n
+		}
+	}
+}
+
+// cardinalityGuard 标签基数防护（#105）：记录每个指标 family 已写入的标签
+// 组合数，新组合将超出上限时 fail-fast panic。记账只覆盖本包 Observe* 打点
+// 路径（与 vec 的实际 child 一一对应：全部写入都经 WithLabelValues 守卫）。
+type cardinalityGuard struct {
+	limit int
+	mu    sync.Mutex
+	seen  map[string]map[string]struct{}
+}
+
+func newCardinalityGuard(limit int) *cardinalityGuard {
+	return &cardinalityGuard{limit: limit, seen: make(map[string]map[string]struct{})}
+}
+
+// allow 判定 family+labels 组合可否写入：已见组合放行（热路径一次 map 读）；
+// 新组合在限额内记账放行；超限 panic（fail-fast，上限经 WithLabelLimit 调整）。
+func (g *cardinalityGuard) allow(family string, labels ...string) {
+	key := strings.Join(labels, "\x00")
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	set := g.seen[family]
+	if set == nil {
+		set = make(map[string]struct{})
+		g.seen[family] = set
+	}
+	if _, ok := set[key]; ok {
+		return
+	}
+	if len(set) >= g.limit {
+		panic(fmt.Sprintf("resilience: 指标 %s 的标签组合数达到上限 %d，拒绝新增组合 %q——"+
+			"高基数来源（实例地址/请求 ID/方法名等）禁止作标签（包文档「标签约定」节）；"+
+			"确需更高上限用 resilience.WithLabelLimit 显式调整（#105）", family, g.limit, key))
+	}
+	set[key] = struct{}{}
+}
+
 // Metrics 弹性指标集。
 //
 //	{ns}_breaker_state{service,kind}                        Gauge   当前熔断状态（0 closed/1 half-open/2 open）
 //	{ns}_breaker_transitions_total{service,kind,from,to}    Counter 状态迁移计数
 //	{ns}_breaker_rejected_total{service,kind}               Counter 熔断打开期间被拒绝的调用数
 //	{ns}_retry_attempts_total{service,kind}                 Counter 额外重试尝试计数（不含首次）
+//
+// 标签基数防护（#105）：每个 family 的标签组合数有上限（缺省
+// DefaultLabelLimit，WithLabelLimit 可调），超限的新组合在首次写入时
+// fail-fast panic——高基数标签来源的误用不会静默无界增长。
 type Metrics struct {
 	breakerState       *prom.GaugeVec
 	breakerTransitions *prom.CounterVec
 	breakerRejected    *prom.CounterVec
 	retryAttempts      *prom.CounterVec
+	guard              *cardinalityGuard
 }
 
 // NewMetrics 创建并注册弹性指标集。reg 为 nil 时回退到包级
@@ -166,14 +247,21 @@ type Metrics struct {
 // 确需进默认全局 registry 的调用方显式传 prom.DefaultRegisterer。
 // namespace 为空时用 "resilience"。同一 Registry + namespace 重复创建时
 // 复用已注册的 collector（多 Client/工厂共享指标是常态）。
-func NewMetrics(reg prom.Registerer, namespace string) *Metrics {
+// opts 定制标签基数防护（WithLabelLimit，#105）。
+func NewMetrics(reg prom.Registerer, namespace string, opts ...MetricsOption) *Metrics {
 	if reg == nil {
 		reg = metrics.Registry
 	}
 	if namespace == "" {
 		namespace = "resilience"
 	}
-	m := &Metrics{}
+	cfg := metricsConfig{labelLimit: DefaultLabelLimit}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&cfg)
+		}
+	}
+	m := &Metrics{guard: newCardinalityGuard(cfg.labelLimit)}
 	m.breakerState = registerReuse(reg, prom.NewGaugeVec(prom.GaugeOpts{
 		Name:      "breaker_state",
 		Namespace: namespace,
@@ -215,6 +303,7 @@ func (m *Metrics) ObserveBreakerStateTyped(service, kind string, state CircuitSt
 			int(state), err)
 		cs = CircuitStateOpen
 	}
+	m.guard.allow("breaker_state", service, kind)
 	m.breakerState.WithLabelValues(service, kind).Set(float64(cs))
 }
 
@@ -237,8 +326,17 @@ func (m *Metrics) ObserveBreakerState(service, kind string, state int) {
 // 状态以类型化 CircuitState 传入：标签值由枚举决定，调用方无需（也不应）
 // 自己拼字符串或裸传 int——数值错位在编译期即被消费侧的钉子挡住。
 //
+// 非法端点值的 fail-loud 由本显式入口承担（#104：String 已纯函数化，不再
+// 打印）——from 在写 counter 前校验告警，to 由 ObserveBreakerStateTyped 校验；
+// 两端的 counter 标签仍按 String 的 "open" 兜底不变（宁可假警报，不谎报健康）。
+//
 // 时序与历史入口保持一致：先算好两端标签值，再写 counter，最后刷 gauge。
 func (m *Metrics) ObserveTransitionTyped(service, kind string, from, to CircuitState) {
+	if _, err := CircuitStateFromIntChecked(int(from)); err != nil {
+		warn.Warnf("ObserveTransitionTyped 收到非法 from 状态值 %d，counter 标签按 open 兜底（fail-loud，#66/#104）：%v",
+			int(from), err)
+	}
+	m.guard.allow("breaker_transitions", service, kind, from.String(), to.String())
 	m.breakerTransitions.WithLabelValues(service, kind, from.String(), to.String()).Inc()
 	m.ObserveBreakerStateTyped(service, kind, to)
 }
@@ -255,11 +353,13 @@ func (m *Metrics) ObserveTransition(service, kind string, from, to int) {
 
 // ObserveRejected 记录一次熔断打开期的调用拒绝。
 func (m *Metrics) ObserveRejected(service, kind string) {
+	m.guard.allow("breaker_rejected", service, kind)
 	m.breakerRejected.WithLabelValues(service, kind).Inc()
 }
 
 // ObserveRetry 记录一次额外重试尝试（不含首次）。
 func (m *Metrics) ObserveRetry(service, kind string) {
+	m.guard.allow("retry_attempts", service, kind)
 	m.retryAttempts.WithLabelValues(service, kind).Inc()
 }
 
