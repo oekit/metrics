@@ -1,3 +1,7 @@
+## [v0.3.1] — 2026-11-13
+
+- 4 单修复：CircuitState.String 纯函数（#104）、WithLabelLimit 四 family 记账（#105）、doc.go DefaultRegisterer（#106）、RegisterReuse nil 回退（#109）；地板对齐 core v0.15.1。
+
 ## [v0.3.0] — 2026-11-12
 
 - feat(metrics): 导出泛型 RegisterReuse[T prom.Collector]——httpx mustRegisterReuse / middleware registerReuse 同款泛型逐字重复的全矩阵单源（#100，治本落点在本仓）：同名重复注册复用既有实例（抑制重复注册），同名异型 panic 带归属前缀的人话文案（既有类型 vs 请求类型 + 怎么改），其余注册错误 panic（MustRegister 边界）；文案前缀经 WithReuseOwner 透传（空串回退默认 "metrics"），godoc 写明 httpx/middleware wave 切换用法——两仓消费方后续 wave 切换，本版只落单源
