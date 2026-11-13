@@ -79,60 +79,16 @@ func (s CircuitState) String() string {
 	}
 }
 
-// 熔断器状态常量（历史 int 入口，与 gobreaker.State 数值一致，独立定义避免包级依赖）。
-//
-// 历史入口，保留只为向后兼容（kitex 等下游仍在用 resilience.StateOpen /
-// resilience.StateName）。新代码请用 CircuitState 与 ObserveTransitionTyped。
-//
-// 注意：这里**刻意不加机器可读的 `Deprecated:` 标记**——staticcheck 的
-// SA1019 会跨模块触发（实测：跨模块调用被弃用符号即报 SA1019），
-// 加标记会让仍在使用本组符号的下游仓 CI 变红。迁移意图以本段文字标注。
-const (
-	StateClosed   = 0
-	StateHalfOpen = 1
-	StateOpen     = 2
-)
-
-// 编译期断言：历史 int 常量与类型化枚举数值必须一致。
-//
-// 手法是「数组长度必须为 0」——差值非 0 即编译失败（差值为正负都失败，
-// 比 uint8(差值) 断言更强：后者只在差值为负时报错）。
-// 目的：resilience 自身两套入口不允许数值分叉，否则同一状态经不同入口
-// 写出的标签会不一致。
-var (
-	_ [0]struct{} = [StateClosed - int(CircuitStateClosed)]struct{}{}
-	_ [0]struct{} = [StateHalfOpen - int(CircuitStateHalfOpen)]struct{}{}
-	_ [0]struct{} = [StateOpen - int(CircuitStateOpen)]struct{}{}
-)
-
-// CircuitStateFromInt 把历史 int 状态映射为类型化状态。
-//
-// 入参数值序为 gobreaker 序（= 本包枚举序，closed/half-open/open = 0/1/2）。
+// CircuitStateFromIntChecked 把 gobreaker 序 int 状态映射为类型化状态：非法数值
+// 返回 ErrInvalidState 包装错误，绝不静默兜底——与 CircuitStateFromBreakerValue /
+// CircuitStateFromName 同一哲学（兜底会把非法值伪装成 closed，#39/#66）。
+// 入参数值序为 gobreaker 序（= 本包枚举序，closed/half-open/open = 0/1/2）；
 // concurrency/breaker 序（closed/open/half-open = 0/1/2）的数值**不同序**，
 // 请走 CircuitStateFromBreakerValue——走错入口会把 open/half_open 互换（#39）。
 //
-// 非法数值（不在 0/1/2 内）不再静默归 closed——「指标说谎」的最后一个静默
-// 入口：两套状态机数值序错传时熔断器已 open，标签恒 closed，告警面失真
-// （#66，#39 同族；同仓 breaker_compat 的转换桥对非法值一直返回
-// ErrInvalidState，本历史入口此前是唯一例外）。本入口是历史 shim（签名无
-// error，kitex 等下游依赖），非法值降级为 fail-loud：stderr WARN 可观测 +
-// 归 CircuitStateOpen（宁可假警报，不谎报健康）；需要 error 在边界直接
-// 拒绝的新调用方用 CircuitStateFromIntChecked。
-func CircuitStateFromInt(state int) CircuitState {
-	cs, err := CircuitStateFromIntChecked(state)
-	if err != nil {
-		warn.Warnf("CircuitStateFromInt 收到非法状态值 %d，按 open 兜底（fail-loud，#66）：%v",
-			state, err)
-		return CircuitStateOpen
-	}
-	return cs
-}
-
-// CircuitStateFromIntChecked 是 CircuitStateFromInt 的类型化变体：非法数值
-// 返回 ErrInvalidState 包装错误，绝不静默兜底——与 CircuitStateFromBreakerValue /
-// CircuitStateFromName 同一哲学（兜底会把非法值伪装成 closed，#39/#66）。
-// 入参数值序与 CircuitStateFromInt 相同（gobreaker 序，closed/half-open/open
-// = 0/1/2）。
+// （历史 int 入口 StateClosed/StateHalfOpen/StateOpen、CircuitStateFromInt、
+// StateName、ObserveBreakerState、ObserveTransition 已于 v0.4.0 删除——
+// kitex/httpx/nns-endpoint 等 org 内消费方已同批迁移 Typed 形态。）
 func CircuitStateFromIntChecked(state int) (CircuitState, error) {
 	switch state {
 	case int(CircuitStateClosed):
@@ -144,14 +100,6 @@ func CircuitStateFromIntChecked(state int) (CircuitState, error) {
 	default:
 		return 0, fmt.Errorf("%w：gobreaker 序状态数值 %d（合法域 0/1/2）", ErrInvalidState, state)
 	}
-}
-
-// StateName 状态数值 → label 值。
-//
-// 历史入口，保留只为向后兼容。实现委托给类型化枚举，
-// 保证两个入口产出的标签值不会分叉。
-func StateName(state int) string {
-	return CircuitStateFromInt(state).String()
 }
 
 // DefaultLabelLimit 单 collector family 的标签组合（child）数缺省上限（#105）。
@@ -307,20 +255,6 @@ func (m *Metrics) ObserveBreakerStateTyped(service, kind string, state CircuitSt
 	m.breakerState.WithLabelValues(service, kind).Set(float64(cs))
 }
 
-// ObserveBreakerState 记录熔断器当前状态（创建时置 closed、迁移时置新状态）。
-//
-// 入参数值序为 gobreaker 序：0=closed / 1=half_open / 2=open（与 gauge help
-// 文本一致）。历史 int shim，内部经 CircuitStateFromInt 收敛为类型化入口：
-// 此前裸 int 原样写入 gauge、无归一无告警，是 #66 转换桥防线上唯一不设防
-// 的入口——两套状态机数值序不同（concurrency/breaker 为 closed/open/
-// half-open=0/1/2），错序的合法值（如 breaker 序 open=1）写进来会被解读成
-// half_open 且连 WARN 都没有（#69）。非法值 fail-loud：stderr WARN +
-// gauge 归 2（与 #66 同款）。运行期无法分辨「合法但错序」的 int，彻底消除
-// 错位请改用 ObserveBreakerStateTyped。
-func (m *Metrics) ObserveBreakerState(service, kind string, state int) {
-	m.ObserveBreakerStateTyped(service, kind, CircuitStateFromInt(state))
-}
-
 // ObserveTransitionTyped 记录一次状态迁移（同时刷新当前状态 gauge）。
 //
 // 状态以类型化 CircuitState 传入：标签值由枚举决定，调用方无需（也不应）
@@ -339,16 +273,6 @@ func (m *Metrics) ObserveTransitionTyped(service, kind string, from, to CircuitS
 	m.guard.allow("breaker_transitions", service, kind, from.String(), to.String())
 	m.breakerTransitions.WithLabelValues(service, kind, from.String(), to.String()).Inc()
 	m.ObserveBreakerStateTyped(service, kind, to)
-}
-
-// ObserveTransition 记录一次状态迁移（同时刷新当前状态 gauge）。
-//
-// 历史入口，保留只为向后兼容（kitex 等下游仍在用 int 形态）。内部做显式
-// 三态映射后转调 ObserveTransitionTyped，两个入口产出的标签值不会分叉。
-//
-// 新代码请用 ObserveTransitionTyped。
-func (m *Metrics) ObserveTransition(service, kind string, from, to int) {
-	m.ObserveTransitionTyped(service, kind, CircuitStateFromInt(from), CircuitStateFromInt(to))
 }
 
 // ObserveRejected 记录一次熔断打开期的调用拒绝。
