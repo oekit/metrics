@@ -1,3 +1,7 @@
+## [v0.4.0] — 2026-11-13
+
+- **BREAKING**：删除 resilience 历史 int 入口五件套——常量 StateClosed/StateHalfOpen/StateOpen、CircuitStateFromInt、StateName、(*Metrics).ObserveBreakerState、(*Metrics).ObserveTransition。下游迁移：State* 常量→CircuitState* 类型化枚举；CircuitStateFromInt→CircuitStateFromIntChecked（非法值返回 ErrInvalidState 而非 WARN 兜底）；StateName(i)→CircuitState.String()；ObserveBreakerState(…,int)→ObserveBreakerStateTyped(…,CircuitState)；ObserveTransition(…,int,int)→ObserveTransitionTyped(…,CircuitState,CircuitState)。裸 int 状态的跨模块数值序错位面（#39/#66/#69）就此关闭；breaker_compat 转换桥（现行契约）保留。org 内消费方 kitex/httpx/nns-endpoint 同批迁移。
+
 ## [v0.3.1] — 2026-11-13
 
 - 4 单修复：CircuitState.String 纯函数（#104）、WithLabelLimit 四 family 记账（#105）、doc.go DefaultRegisterer（#106）、RegisterReuse nil 回退（#109）；地板对齐 core v0.15.1。
