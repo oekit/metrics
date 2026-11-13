@@ -59,78 +59,21 @@ func TestStateMapping(t *testing.T) {
 	for _, fx := range stateFixture {
 		t.Run(fx.name, func(t *testing.T) {
 			m, reg := newTestMetrics()
-			m.ObserveTransitionTyped("svc", "httpx",
-				CircuitStateFromInt(fx.from), CircuitStateFromInt(fx.to))
+			from, err := CircuitStateFromIntChecked(fx.from)
+			if err != nil {
+				t.Fatalf("fixture from=%d 非法：%v", fx.from, err)
+			}
+			to, err := CircuitStateFromIntChecked(fx.to)
+			if err != nil {
+				t.Fatalf("fixture to=%d 非法：%v", fx.to, err)
+			}
+			m.ObserveTransitionTyped("svc", "httpx", from, to)
 			if err := testutil.GatherAndCompare(reg,
 				strings.NewReader(wantExposition(fx)),
 				"test_breaker_state", "test_breaker_transitions_total"); err != nil {
 				t.Fatalf("类型化入口产出的 series 不符：%v", err)
 			}
 		})
-	}
-}
-
-// TestObserveTransition_LegacyShimMatchesTyped 验证历史 int 入口（kitex 等
-// 下游仍在用）与类型化入口产出**完全一致**的 series——向后兼容的判据是
-// 「旧调用点迁移前后指标不变」，不是「旧入口还在」。
-func TestObserveTransition_LegacyShimMatchesTyped(t *testing.T) {
-	for _, fx := range stateFixture {
-		t.Run(fx.name, func(t *testing.T) {
-			m, reg := newTestMetrics()
-			// 历史入口：裸 int 形态（向后兼容路径）
-			m.ObserveTransition("svc", "httpx", fx.from, fx.to)
-			if err := testutil.GatherAndCompare(reg,
-				strings.NewReader(wantExposition(fx)),
-				"test_breaker_state", "test_breaker_transitions_total"); err != nil {
-				t.Fatalf("历史 int 入口产出的 series 与类型化入口不一致：%v", err)
-			}
-		})
-	}
-}
-
-// TestStateConstants_AgreeWithTypedEnum 固化「历史 int 常量 == 类型化枚举」。
-// 编译期断言已在 metrics.go（数组长度必须为 0），此处补运行期断言以在
-// CI 输出里显式呈现该契约。
-func TestStateConstants_AgreeWithTypedEnum(t *testing.T) {
-	cases := []struct {
-		name    string
-		legacy  int
-		typed   CircuitState
-		wantTag string
-	}{
-		{"closed", StateClosed, CircuitStateClosed, "closed"},
-		{"half_open", StateHalfOpen, CircuitStateHalfOpen, "half_open"},
-		{"open", StateOpen, CircuitStateOpen, "open"},
-	}
-	for _, c := range cases {
-		if c.legacy != int(c.typed) {
-			t.Fatalf("%s: 历史常量=%d 类型化枚举=%d 不一致", c.name, c.legacy, int(c.typed))
-		}
-		if got := c.typed.String(); got != c.wantTag {
-			t.Fatalf("%s: String()=%q, want %q", c.name, got, c.wantTag)
-		}
-	}
-}
-
-// TestStateName_MatchesTypedString 验证两个入口的标签值不分叉。
-func TestStateName_MatchesTypedString(t *testing.T) {
-	for _, s := range []CircuitState{CircuitStateClosed, CircuitStateHalfOpen, CircuitStateOpen} {
-		if got, want := StateName(int(s)), s.String(); got != want {
-			t.Fatalf("StateName(%d)=%q，%v.String()=%q，两者必须一致", int(s), got, s, want)
-		}
-	}
-}
-
-// TestCircuitStateFromInt_IllegalFallsLoud 验证非法数值不再静默归 closed
-// （#66）——closed 是「健康」标签，非法值伪装成它即指标说谎（#39 同族）；
-// 本入口是历史 shim（签名无 error），非法值降级为 fail-loud：归 open
-// （宁可假警报，不谎报健康）。WARN 可观测单独断言
-// （TestCircuitStateFromInt_WarnsOnIllegal）。
-func TestCircuitStateFromInt_IllegalFallsLoud(t *testing.T) {
-	for _, bad := range []int{-1, 3, 99} {
-		if got := CircuitStateFromInt(bad); got != CircuitStateOpen {
-			t.Fatalf("CircuitStateFromInt(%d)=%v, want open（fail-loud 兜底，#66）", bad, got)
-		}
 	}
 }
 
@@ -180,39 +123,6 @@ func TestCircuitStateString_IllegalFallsLoud(t *testing.T) {
 	}
 }
 
-// TestStateName_IllegalMatchesFromInt 验证 StateName 与 CircuitStateFromInt
-// 在非法数值上不分叉（StateName 委托实现，钉住不被改回独立 switch）。
-func TestStateName_IllegalMatchesFromInt(t *testing.T) {
-	for _, bad := range []int{-1, 3, 99} {
-		if got, want := StateName(bad), CircuitStateFromInt(bad).String(); got != want {
-			t.Fatalf("StateName(%d)=%q，CircuitStateFromInt(%d).String()=%q，两者必须一致",
-				bad, got, bad, want)
-		}
-		if got := StateName(bad); got != "open" {
-			t.Fatalf("StateName(%d)=%q, want \"open\"（fail-loud，#66）", bad, got)
-		}
-	}
-}
-
-// TestObserveTransition_IllegalIntFallsLoud 验证历史 int 入口对非法数值的
-// 端到端产出（#66）：to 标签 "open"、gauge 置 2（= CircuitStateOpen）——
-// 告警面拿到的是「响」而非「谎报健康」。
-func TestObserveTransition_IllegalIntFallsLoud(t *testing.T) {
-	m, reg := newTestMetrics()
-	m.ObserveTransition("svc", "httpx", 0, 7) // 7 非法 → open
-	want := `# HELP test_breaker_state Circuit breaker state: 0=closed 1=half_open 2=open.
-# TYPE test_breaker_state gauge
-test_breaker_state{kind="httpx",service="svc"} 2
-# HELP test_breaker_transitions_total Total number of circuit breaker state transitions.
-# TYPE test_breaker_transitions_total counter
-test_breaker_transitions_total{from="closed",kind="httpx",service="svc",to="open"} 1
-`
-	if err := testutil.GatherAndCompare(reg, strings.NewReader(want),
-		"test_breaker_state", "test_breaker_transitions_total"); err != nil {
-		t.Fatalf("非法 int 迁移的 series 不符（#66 fail-loud 口径）：%v", err)
-	}
-}
-
 // TestObserveBreakerState_TypedMatchesGaugeHelp 验证类型化 gauge 入口三态
 // 写出的数值与 help 文本约定一致（0=closed 1=half_open 2=open，#69）。
 func TestObserveBreakerState_TypedMatchesGaugeHelp(t *testing.T) {
@@ -233,61 +143,6 @@ func TestObserveBreakerState_TypedMatchesGaugeHelp(t *testing.T) {
 				t.Fatalf("ObserveBreakerStateTyped(%v) gauge=%v, want %v", c.state, got, c.want)
 			}
 		})
-	}
-}
-
-// TestObserveBreakerState_LegacyShimMatchesTyped 验证历史 int 入口与类型化
-// 入口在合法域产出完全一致的 gauge 值（迁移前后指标不变的向后兼容判据）。
-func TestObserveBreakerState_LegacyShimMatchesTyped(t *testing.T) {
-	for _, s := range []int{0, 1, 2} {
-		mTyped, _ := newTestMetrics()
-		mTyped.ObserveBreakerStateTyped("svc", "httpx", CircuitState(s))
-		mLegacy, _ := newTestMetrics()
-		mLegacy.ObserveBreakerState("svc", "httpx", s)
-		got := testutil.ToFloat64(mLegacy.breakerState.WithLabelValues("svc", "httpx"))
-		want := testutil.ToFloat64(mTyped.breakerState.WithLabelValues("svc", "httpx"))
-		if got != want {
-			t.Fatalf("ObserveBreakerState(%d) gauge=%v, ObserveBreakerStateTyped gauge=%v，两入口不得分叉", s, got, want)
-		}
-	}
-}
-
-// TestObserveBreakerState_IllegalIntFallsLoud 验证 gauge 入口不再把裸 int
-// 原样写入（#69）：非法值 fail-loud——stderr WARN 可观测 + gauge 归 2
-// （= CircuitStateOpen，宁可假警报，不谎报健康，#66 同款）。
-func TestObserveBreakerState_IllegalIntFallsLoud(t *testing.T) {
-	m, _ := newTestMetrics()
-	out := captureStderr(t, func() {
-		m.ObserveBreakerState("svc", "httpx", 7) // 7 非法 → gauge 归 2
-	})
-	if got := testutil.ToFloat64(m.breakerState.WithLabelValues("svc", "httpx")); got != 2 {
-		t.Fatalf("ObserveBreakerState 非法 int gauge=%v, want 2（fail-loud 兜底，#69）", got)
-	}
-	if !strings.Contains(out, "7") || !strings.Contains(out, "WARN") {
-		t.Fatalf("stderr WARN 必须包含非法值 7 与 WARN 标记，got: %q", out)
-	}
-
-	// 类型化入口的非法强转同样 fail-loud。
-	m2, _ := newTestMetrics()
-	out = captureStderr(t, func() {
-		m2.ObserveBreakerStateTyped("svc", "httpx", CircuitState(99))
-	})
-	if got := testutil.ToFloat64(m2.breakerState.WithLabelValues("svc", "httpx")); got != 2 {
-		t.Fatalf("ObserveBreakerStateTyped 非法强转 gauge=%v, want 2（fail-loud 兜底，#69）", got)
-	}
-	if !strings.Contains(out, "99") || !strings.Contains(out, "WARN") {
-		t.Fatalf("stderr WARN 必须包含非法值 99 与 WARN 标记，got: %q", out)
-	}
-
-	// 合法值绝不产生 WARN（避免热路径噪音）。
-	out = captureStderr(t, func() {
-		m.ObserveBreakerState("svc", "httpx", 0)
-		m.ObserveBreakerState("svc", "httpx", 1)
-		m.ObserveBreakerState("svc", "httpx", 2)
-		m.ObserveBreakerStateTyped("svc", "httpx", CircuitStateOpen)
-	})
-	if out != "" {
-		t.Fatalf("合法值不得产生 stderr WARN，got: %q", out)
 	}
 }
 
@@ -326,37 +181,6 @@ func captureStderr(t *testing.T, fn func()) string {
 		t.Fatal(readErr)
 	}
 	return string(data)
-}
-
-// TestCircuitStateFromInt_WarnsOnIllegal 验证非法值的 stderr WARN 可观测
-// （#66 修法要求：错标必须可观测，同 registerReuse 降级 WARN 先例）。
-func TestCircuitStateFromInt_WarnsOnIllegal(t *testing.T) {
-	out := captureStderr(t, func() {
-		_ = CircuitStateFromInt(7)
-	})
-	if !strings.Contains(out, "7") || !strings.Contains(out, "WARN") {
-		t.Fatalf("stderr WARN 必须包含非法值 7 与 WARN 标记，got: %q", out)
-	}
-
-	// #104 起 String 为纯函数：不再打印告警（fail-loud 收敛到 CircuitStateFromInt
-	// 等显式入口，由上一段与 TestCircuitStateString_IsPure_NoWarn 钉住）。
-	out = captureStderr(t, func() {
-		_ = CircuitState(99).String()
-	})
-	if out != "" {
-		t.Fatalf("String() 必须是纯函数（#104），却产生 stderr 输出：%q", out)
-	}
-
-	// 合法值绝不产生 WARN（避免热路径噪音）。
-	out = captureStderr(t, func() {
-		for _, s := range []int{0, 1, 2} {
-			_ = CircuitStateFromInt(s)
-			_ = CircuitState(s).String()
-		}
-	})
-	if out != "" {
-		t.Fatalf("合法值不得产生 stderr WARN，got: %q", out)
-	}
 }
 
 // TestCircuitStateString_IsPure_NoWarn String 为纯函数（#104）：非法值重复

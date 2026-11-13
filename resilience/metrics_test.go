@@ -18,12 +18,12 @@ func newTestMetrics() (*Metrics, *prom.Registry) {
 func TestMetrics_Observations(t *testing.T) {
 	m, _ := newTestMetrics()
 
-	m.ObserveBreakerState("svc-a", "httpx", StateClosed)
+	m.ObserveBreakerStateTyped("svc-a", "httpx", CircuitStateClosed)
 	if got := testutil.ToFloat64(m.breakerState.WithLabelValues("svc-a", "httpx")); got != 0 {
 		t.Fatalf("expected closed state 0, got %v", got)
 	}
 
-	m.ObserveTransition("svc-a", "httpx", StateClosed, StateOpen)
+	m.ObserveTransitionTyped("svc-a", "httpx", CircuitStateClosed, CircuitStateOpen)
 	if got := testutil.ToFloat64(m.breakerState.WithLabelValues("svc-a", "httpx")); got != 2 {
 		t.Fatalf("expected open state 2 after transition, got %v", got)
 	}
@@ -43,17 +43,17 @@ func TestMetrics_Observations(t *testing.T) {
 	}
 }
 
-// TestStateName 验证状态 label 值映射。
-func TestStateName(t *testing.T) {
-	cases := map[int]string{
-		StateClosed:   "closed",
-		StateHalfOpen: "half_open",
-		StateOpen:     "open",
-		99:            "open", // 未知值 fail-loud 归 open，不谎报健康（#66）
+// TestCircuitStateStringTags 验证状态 label 值映射（原 StateName 历史入口删除后，
+// 标签值断言由类型化枚举的 String 承接）。
+func TestCircuitStateStringTags(t *testing.T) {
+	cases := map[CircuitState]string{
+		CircuitStateClosed:   "closed",
+		CircuitStateHalfOpen: "half_open",
+		CircuitStateOpen:     "open",
 	}
 	for state, want := range cases {
-		if got := StateName(state); got != want {
-			t.Errorf("StateName(%d) = %q, want %q", state, got, want)
+		if got := state.String(); got != want {
+			t.Errorf("CircuitState(%d).String() = %q, want %q", int(state), got, want)
 		}
 	}
 }

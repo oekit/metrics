@@ -62,13 +62,13 @@ func TestCircuitStateFromBreakerValue_OpenHalfNotSwapped(t *testing.T) {
 		t.Fatalf("breaker half-open(=%d) 转出 %v，必须是 half_open 且不得是 open（#39 互换回归）",
 			BreakerValueHalfOpen, half)
 	}
-	// 同一数值走 gobreaker 序入口（CircuitStateFromInt）得到的是相反语义——
-	// 这就是 (#39) 的静默错位本体，转换桥存在的理由。
-	if CircuitStateFromInt(BreakerValueOpen) == open {
-		t.Fatalf("gobreaker 序入口与 breaker 序转换产出同一语义，说明数值序假设已失效，请复查映射表")
+	// 同一数值走 gobreaker 序入口（CircuitStateFromIntChecked）得到的是相反
+	// 语义——这就是 (#39) 的静默错位本体，转换桥存在的理由。
+	if goOpen, err := CircuitStateFromIntChecked(BreakerValueOpen); err != nil || goOpen == open {
+		t.Fatalf("gobreaker 序入口与 breaker 序转换产出同一语义（err=%v），说明数值序假设已失效，请复查映射表", err)
 	}
-	if CircuitStateFromInt(BreakerValueHalfOpen) == half {
-		t.Fatalf("gobreaker 序入口与 breaker 序转换产出同一语义，说明数值序假设已失效，请复查映射表")
+	if goHalf, err := CircuitStateFromIntChecked(BreakerValueHalfOpen); err != nil || goHalf == half {
+		t.Fatalf("gobreaker 序入口与 breaker 序转换产出同一语义（err=%v），说明数值序假设已失效，请复查映射表", err)
 	}
 }
 

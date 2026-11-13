@@ -79,8 +79,8 @@ func TestRegisterReuse_SameType_ReusesExisting(t *testing.T) {
 		t.Fatal("两次 NewMetrics 应返回各自的实例（复用的是 collector 而非 Metrics 结构体）")
 	}
 	// collector 必须被复用（否则重复注册会报错）——这里能正常构造即说明复用成功。
-	first.ObserveBreakerState("svc", "httpx", 1)
-	second.ObserveBreakerState("svc", "httpx", 2)
+	first.ObserveBreakerStateTyped("svc", "httpx", CircuitStateHalfOpen)
+	second.ObserveBreakerStateTyped("svc", "httpx", CircuitStateOpen)
 
 	mfs, err := reg.Gather()
 	if err != nil {
