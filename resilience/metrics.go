@@ -169,6 +169,16 @@ func (g *cardinalityGuard) allow(family string, labels ...string) {
 	set[key] = struct{}{}
 }
 
+// has 报告 family+labels 组合是否已记账（= 本实例已写过该序列）。
+// 与 allow 同一记账面：全部写入都经 allow 守卫，已记账即序列已存在。
+func (g *cardinalityGuard) has(family string, labels ...string) bool {
+	key := strings.Join(labels, "\x00")
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	_, ok := g.seen[family][key]
+	return ok
+}
+
 // Metrics 弹性指标集。
 //
 //	{ns}_breaker_state{service,kind}                        Gauge   当前熔断状态（0 closed/1 half-open/2 open）
@@ -196,6 +206,13 @@ type Metrics struct {
 // namespace 为空时用 "resilience"。同一 Registry + namespace 重复创建时
 // 复用已注册的 collector（多 Client/工厂共享指标是常态）。
 // opts 定制标签基数防护（WithLabelLimit，#105）。
+//
+// ⚠️ NewMetrics 只注册 collector，**不预写任何序列**（#138）：返回时
+// breaker_state 一条 series 都没有，service/kind 在首次 Observe* 之前完全
+// 缺席——breaker_state==2 类告警在「新服务刚接入、还没发生过迁移」的窗口
+// 内不触发，看板上是空白而不是 0=closed。需要「序列从创建即存在」的消费方
+// 构造后立即调用 InitService 显式补位（httpx 的熔断 gauge 初始化行即此
+// 义务的既有手补形态）。
 func NewMetrics(reg prom.Registerer, namespace string, opts ...MetricsOption) *Metrics {
 	if reg == nil {
 		reg = metrics.Registry
@@ -233,8 +250,31 @@ func NewMetrics(reg prom.Registerer, namespace string, opts ...MetricsOption) *M
 	return m
 }
 
-// ObserveBreakerStateTyped 记录熔断器当前状态（创建时置 closed、迁移时置
-// 新状态）。
+// InitService 为 (service, kind) 预写 breaker_state=0（closed），让序列
+// **从创建即存在**（#138）：breaker_state==2 类告警与按服务看板对「新接入、
+// 尚未发生过迁移」的服务有信号（缺席序列不满足比较——告警盲区；看板空白
+// 无法区分「没接入」与「正常关闭」）。
+//
+// NewMetrics 只注册 collector、不预写任何序列，本方法是那个缺口的显式
+// 补位（httpx 构造期手补一行 ObserveBreakerStateTyped(..., Closed) 的
+// 单源化，义务从消费方注释升格为库方法）。应在构造期、任何 Observe*
+// 之前调用：本实例已写过该组合时幂等跳过（不把已推进的状态重置回
+// closed）；跨实例共享 collector 的场景请在各自构造期调用——迟到调用
+// 可能把已反映真实状态的 gauge 写回 0（状态此后由 ObserveBreakerStateTyped /
+// ObserveTransitionTyped 维护）。
+func (m *Metrics) InitService(service, kind string) {
+	if m.guard.has("breaker_state", service, kind) {
+		return // 幂等：序列已由本实例创建/写过，不重置已推进的状态
+	}
+	m.guard.allow("breaker_state", service, kind)
+	m.breakerState.WithLabelValues(service, kind).Set(0)
+}
+
+// ObserveBreakerStateTyped 记录熔断器当前状态（迁移时置新状态）。
+//
+// 「创建时置 closed」不在本方法也不在 NewMetrics——序列的创建由
+// InitService 显式完成（#138：NewMetrics 只注册 collector，本方法在
+// 首次调用前对该 service/kind 没有任何可写的「创建时」）。
 //
 // 状态以类型化 CircuitState 传入：数值序与 gobreaker.State 一致
 // （Closed=0/HalfOpen=1/Open=2），错位在编译期即被消费侧的钉子挡住，
