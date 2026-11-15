@@ -80,6 +80,54 @@ func TestNewMetrics_Defaults(t *testing.T) {
 	}
 }
 
+// —— 序列创建义务（#138）——
+
+// TestNewMetrics_NoInitialSeries_KnownBehavior 钉住已知行为（#138）：
+// NewMetrics 只注册 collector、不预写任何 breaker_state 序列——service/kind
+// 在首次 Observe* 之前完全缺席。这正是告警盲区的根源（缺席序列不满足
+// breaker_state==2 比较、看板空白无法区分「没接入」与「正常关闭」），
+// 显式补位由 InitService 承接。
+func TestNewMetrics_NoInitialSeries_KnownBehavior(t *testing.T) {
+	_, reg := newTestMetrics()
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mf := range mfs {
+		if mf.GetName() == "test_breaker_state" {
+			t.Fatalf("NewMetrics 不应预写 breaker_state 序列（已知行为，#138），got %d 条", len(mf.GetMetric()))
+		}
+	}
+}
+
+// TestInitService_CreatesClosedSeries InitService 让序列从创建即存在：
+// 写 0=closed（告警/看板对新服务有信号）、后续迁移照常覆盖、本实例重复
+// 调用幂等（不把已推进的状态重置回 closed）。
+func TestInitService_CreatesClosedSeries(t *testing.T) {
+	m, reg := newTestMetrics()
+	m.InitService("svc", "httpx")
+
+	want := `# HELP test_breaker_state Circuit breaker state: 0=closed 1=half_open 2=open.
+# TYPE test_breaker_state gauge
+test_breaker_state{kind="httpx",service="svc"} 0
+`
+	if err := testutil.GatherAndCompare(reg, strings.NewReader(want), "test_breaker_state"); err != nil {
+		t.Fatalf("InitService 后 breaker_state 应存在且为 0=closed：%v", err)
+	}
+
+	// 迁移照常覆盖创建值
+	m.ObserveTransitionTyped("svc", "httpx", CircuitStateClosed, CircuitStateOpen)
+	if got := testutil.ToFloat64(m.breakerState.WithLabelValues("svc", "httpx")); got != 2 {
+		t.Fatalf("迁移后 gauge=%v, want 2", got)
+	}
+
+	// 本实例重复调用幂等：不重置已推进的状态
+	m.InitService("svc", "httpx")
+	if got := testutil.ToFloat64(m.breakerState.WithLabelValues("svc", "httpx")); got != 2 {
+		t.Fatalf("InitService 重复调用不得重置已推进状态，gauge=%v, want 2", got)
+	}
+}
+
 // —— 标签基数防护（#105）——
 
 // mustPanic 收编期望中的 fail-fast panic，返回 panic 值（非 panic 即失败）。

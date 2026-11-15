@@ -144,6 +144,34 @@ func TestInit_ConcurrentSafe(t *testing.T) {
 	}
 }
 
+// TestInit_EmptyServiceName_FailFast 端到端（#140）：Init("") 构造期
+// fail-fast panic——空名会让 CurrentService()=="" 的「未调用」判据失效
+// （本仓测试自己在用这个判据），app_build_info{service=""} 与未初始化
+// 同值不可分且零告警。panic 先于任何全局副作用；此后 CurrentService()==""
+// 仍只表示「未调用」，合法首调照常生效。
+func TestInit_EmptyServiceName_FailFast(t *testing.T) {
+	resetInitState(t)
+
+	r := recoverPanic(t, func() { Init("") })
+	if r == nil {
+		t.Fatal("Init(\"\") 必须 fail-fast panic（#140）")
+	}
+	if !strings.Contains(fmt.Sprint(r), "serviceName") {
+		t.Fatalf("panic 消息应点名 serviceName，got: %v", r)
+	}
+	// panic 先于 CAS 与 initOnce：状态保持「未调用」、零注册副作用
+	if got := CurrentService(); got != "" {
+		t.Fatalf("panic 后 CurrentService() 应仍为未调用的空串，got %q", got)
+	}
+
+	// 合法首调照常生效：CurrentService()=="" 此后唯一含义就是「未调用过」
+	Init("after-empty-svc")
+	if got := CurrentService(); got != "after-empty-svc" {
+		t.Fatalf("CurrentService() = %q, want %q", got, "after-empty-svc")
+	}
+	assertBuildInfoService(t, Registry, "after-empty-svc")
+}
+
 func TestRegistry_NotNil(t *testing.T) {
 	if Registry == nil {
 		t.Error("expected non-nil Registry")

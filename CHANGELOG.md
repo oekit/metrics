@@ -1,3 +1,11 @@
+## [v0.4.1] — 2026-11-15
+
+- InitService 显式预写序列（#138）：NewMetrics 只注册 collector 的缺席面写进 godoc，新增 InitService 幂等预写 breaker_state=0，撤掉「创建时置 closed」的假承诺
+- 迁移计数两端统一校验（#139）：ObserveTransitionTyped 的 from/to 先过同一校验，非法即拒绝计数+WARN，不再 String() 兜底写成 open 标签
+- Init 拒绝空 serviceName（#140）：构造期 fail-fast panic 先于 CAS/initOnce 零全局副作用，CurrentService 判据不再被空串骗过
+
+关联问题单：metrics#138、metrics#139、metrics#140。
+
 ## [v0.4.0] — 2026-11-13
 
 - **BREAKING**：删除 resilience 历史 int 入口五件套——常量 StateClosed/StateHalfOpen/StateOpen、CircuitStateFromInt、StateName、(*Metrics).ObserveBreakerState、(*Metrics).ObserveTransition。下游迁移：State* 常量→CircuitState* 类型化枚举；CircuitStateFromInt→CircuitStateFromIntChecked（非法值返回 ErrInvalidState 而非 WARN 兜底）；StateName(i)→CircuitState.String()；ObserveBreakerState(…,int)→ObserveBreakerStateTyped(…,CircuitState)；ObserveTransition(…,int,int)→ObserveTransitionTyped(…,CircuitState,CircuitState)。裸 int 状态的跨模块数值序错位面（#39/#66/#69）就此关闭；breaker_compat 转换桥（现行契约）保留。org 内消费方 kitex/httpx/nns-endpoint 同批迁移。

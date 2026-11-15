@@ -53,6 +53,13 @@ var currentService atomic.Pointer[string]
 // 参数 serviceName 用于 app_build_info 的 service 标签，如 "fuxi_engine"、"moyu-server"。
 // 必须在 main.go 中调用，且在启动 Hertz server 之前。
 //
+// serviceName 为空是配置错误（配置零值透传最常见形态）——构造期
+// fail-fast panic（#140；Init 无 error 出口故用 panic，与本仓注册面的
+// fail-fast 同款纪律）：空名会让 CurrentService()=="" 的「未调用」判据
+// 失效（本仓测试与下游初始化守卫都在用），app_build_info{service=""}
+// 与未初始化同值不可分且零告警，指标面/日志面/状态查询面三处都看不见
+// 「没配 service」这个配置错误。
+//
 // 多次调用是安全的，只有第一次调用会注册指标；service 标签也取**第一次**
 // 调用传入的名字——进程内 service 名首调即定，后续调用传入不同的
 // serviceName 不会生效（打 stderr WARN 提示，不再静默丢弃，#49），
@@ -75,6 +82,13 @@ var currentService atomic.Pointer[string]
 // sync.OnceFunc 的 panic 传播语义，后续**每次** Init 都会重炸同一错误，
 // 修复 Registry 上的冲突前不可能静默假装成功；契约：修冲突、重启进程。
 func Init(serviceName string) {
+	// 空名 fail-fast（#140）：先于 CAS 与 initOnce——panic 后无任何全局
+	// 副作用，CurrentService()=="" 保持只表示「未调用」。
+	if serviceName == "" {
+		panic("metrics.Init: serviceName 不能为空——空名会让 CurrentService()==\"\" 的「未调用」判据失效" +
+			"（app_build_info{service=\"\"} 与未初始化同值不可分、零告警），" +
+			"配置零值透传最常见形态（#140）")
+	}
 	// 首调即定（#49 契约不变）：OnceFunc 的 f 无参，生效名以第一个 CAS
 	// 成功的调用为准——原子序与「首次调用」一一对应，initMetrics 读到的
 	// 就是首调名；落选调用在尾部统一 WARN。
@@ -165,7 +179,9 @@ func registerStartTime(reg prometheus.Registerer) (prometheus.Gauge, error) {
 }
 
 // CurrentService 返回当前生效的 service 名，即首次 Init 传入的名字。
-// Init 尚未调用时返回空字符串。并发安全。
+// Init 尚未调用时返回空字符串——Init 拒绝空名（#140：空名直接 panic），
+// 故空串只可能是「未调用」这一种情形，判据不再与「Init("")」混淆。
+// 并发安全。
 func CurrentService() string {
 	if p := currentService.Load(); p != nil {
 		return *p
