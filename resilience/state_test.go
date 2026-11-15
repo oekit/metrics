@@ -201,39 +201,67 @@ func TestCircuitStateString_IsPure_NoWarn(t *testing.T) {
 	}
 }
 
-// TestObserveTransitionTyped_InvalidFromWarns 显式打点入口承接 fail-loud
-// （#104）：from 非法时本入口打一行 WARN，counter 的 from 标签仍按 "open"
-// 兜底（宁可假警报，不谎报健康）；to 合法时无额外 WARN。
-func TestObserveTransitionTyped_InvalidFromWarns(t *testing.T) {
+// TestObserveTransitionTyped_InvalidFromRejected 非法 from 拒绝本次迁移
+// 计数（#139：两端与 gauge 同一校验口径）——不把 99 经 String 兜底写成
+// "open" 进 from 标签（那会往矩阵记一次从未发生的 open→X 迁移，指标说谎）；
+// gauge 照常按 to 刷新；to 合法时恰好一条 WARN；随后的合法迁移零告警。
+func TestObserveTransitionTyped_InvalidFromRejected(t *testing.T) {
 	m, reg := newTestMetrics()
-	var out string
-	out = captureStderr(t, func() {
+	out := captureStderr(t, func() {
 		m.ObserveTransitionTyped("svc", "httpx", CircuitState(99), CircuitStateClosed)
 	})
 	if n := strings.Count(out, "[metrics] WARN:"); n != 1 {
 		t.Fatalf("非法 from 应告警恰好一次，got %d 次：%q", n, out)
 	}
-	if !strings.Contains(out, "非法 from 状态值 99") {
-		t.Fatalf("WARN 未指明非法 from 值：%q", out)
+	if !strings.Contains(out, "拒绝本次迁移计数") || !strings.Contains(out, "from=99") {
+		t.Fatalf("WARN 应指明拒绝计数与非法端点值：%q", out)
 	}
+	if got := testutil.ToFloat64(m.breakerState.WithLabelValues("svc", "httpx")); got != 0 {
+		t.Fatalf("gauge 照常按 to 刷新，got %v, want 0", got)
+	}
+	// 迁移家族零序列（拒绝计数）：期望文本里只有 gauge——任何 from="open"
+	// 兜底序列的出现都会让比对失败。
 	want := `# HELP test_breaker_state Circuit breaker state: 0=closed 1=half_open 2=open.
 # TYPE test_breaker_state gauge
 test_breaker_state{kind="httpx",service="svc"} 0
-# HELP test_breaker_transitions_total Total number of circuit breaker state transitions.
-# TYPE test_breaker_transitions_total counter
-test_breaker_transitions_total{from="open",kind="httpx",service="svc",to="closed"} 1
 `
 	if err := testutil.GatherAndCompare(reg, strings.NewReader(want),
 		"test_breaker_state", "test_breaker_transitions_total"); err != nil {
-		t.Fatalf("非法 from 的 counter 标签应按 open 兜底：%v", err)
+		t.Fatalf("非法 from 不得写入任何迁移序列（拒绝计数，#139）：%v", err)
 	}
 
-	// 合法迁移零告警（既有用例 TestObserveTransitionTyped_RefreshesGaugeWithoutWarn
-	// 的口径在 #104 之后保持不变）
+	// 合法迁移零告警（既有口径在 #104/#139 之后保持不变）
 	out = captureStderr(t, func() {
 		m.ObserveTransitionTyped("svc", "httpx", CircuitStateClosed, CircuitStateOpen)
 	})
 	if out != "" {
 		t.Fatalf("合法迁移不得产生 WARN：%q", out)
+	}
+}
+
+// TestObserveTransitionTyped_InvalidToRejected 非法 to 同样拒绝计数（两端
+// 同一校验口径，#139）；gauge 按既有口径 WARN + 归 open——两条 WARN 各说
+// 各的事实（计数被拒 / gauge 兜底），counter 侧不再有静默的 String 兜底。
+func TestObserveTransitionTyped_InvalidToRejected(t *testing.T) {
+	m, reg := newTestMetrics()
+	out := captureStderr(t, func() {
+		m.ObserveTransitionTyped("svc", "httpx", CircuitStateClosed, CircuitState(99))
+	})
+	if n := strings.Count(out, "[metrics] WARN:"); n != 2 {
+		t.Fatalf("非法 to 应有「拒绝计数」「gauge 兜底」两条 WARN，got %d 次：%q", n, out)
+	}
+	if !strings.Contains(out, "to=99") {
+		t.Fatalf("WARN 应指明非法 to 端点：%q", out)
+	}
+	if got := testutil.ToFloat64(m.breakerState.WithLabelValues("svc", "httpx")); got != 2 {
+		t.Fatalf("gauge 按既有口径归 open（#69），got %v, want 2", got)
+	}
+	want := `# HELP test_breaker_state Circuit breaker state: 0=closed 1=half_open 2=open.
+# TYPE test_breaker_state gauge
+test_breaker_state{kind="httpx",service="svc"} 2
+`
+	if err := testutil.GatherAndCompare(reg, strings.NewReader(want),
+		"test_breaker_state", "test_breaker_transitions_total"); err != nil {
+		t.Fatalf("非法 to 不得写入任何迁移序列（拒绝计数，#139）：%v", err)
 	}
 }

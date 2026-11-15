@@ -63,9 +63,10 @@ const (
 // 本方法为**纯函数**（#104）：不再打印 stderr 告警。Stringer 会被 %v、
 // panic dump、pprof 标签、调试器间接调用——String 里做 I/O 副作用，消费方
 // 循环传非法态时告警逐事件刷屏且无法关闭。fail-loud 告警收敛到**显式转换/
-// 打点入口**：CircuitStateFromInt / ObserveBreakerStateTyped /
-// ObserveTransitionTyped（各自对非法值的 WARN 语义不变）。需要 error 的
-// 判定走 BreakerValue / CircuitStateFromIntChecked（非法值返回 ErrInvalidState）。
+// 打点入口**：CircuitStateFromIntChecked / ObserveBreakerStateTyped /
+// ObserveTransitionTyped（打点入口对非法值 WARN；迁移入口另拒绝本次计数，
+// 不把本方法的 "open" 兜底写进迁移矩阵标签，#139）。需要 error 的判定走
+// BreakerValue / CircuitStateFromIntChecked（非法值返回 ErrInvalidState）。
 func (s CircuitState) String() string {
 	switch s {
 	case CircuitStateClosed:
@@ -300,18 +301,26 @@ func (m *Metrics) ObserveBreakerStateTyped(service, kind string, state CircuitSt
 // 状态以类型化 CircuitState 传入：标签值由枚举决定，调用方无需（也不应）
 // 自己拼字符串或裸传 int——数值错位在编译期即被消费侧的钉子挡住。
 //
-// 非法端点值的 fail-loud 由本显式入口承担（#104：String 已纯函数化，不再
-// 打印）——from 在写 counter 前校验告警，to 由 ObserveBreakerStateTyped 校验；
-// 两端的 counter 标签仍按 String 的 "open" 兜底不变（宁可假警报，不谎报健康）。
+// 两端先各过 CircuitStateFromIntChecked，与 gauge 同一校验口径（#139）：
+// 任一端非法 ⇒ **拒绝本次迁移计数**并打 WARN——不把非法值经 String() 的
+// "open" 兜底写进 from/to 标签，那会往迁移矩阵记一次从未发生的 open→X
+// 迁移（指标说谎，#39/#66 同族）；当前状态 gauge 照常刷新（非法 to 由
+// ObserveBreakerStateTyped 按既有口径 WARN + 归 open，两条 WARN 各说各的
+// 事实：计数被拒 / gauge 兜底）。from/to 标签与 gauge 数值永远出自同一
+// 校验口径，不再「一个方法两套处置」。
 //
-// 时序与历史入口保持一致：先算好两端标签值，再写 counter，最后刷 gauge。
+// 时序与历史入口保持一致：先校验，再写 counter，最后刷 gauge。
 func (m *Metrics) ObserveTransitionTyped(service, kind string, from, to CircuitState) {
-	if _, err := CircuitStateFromIntChecked(int(from)); err != nil {
-		warn.Warnf("ObserveTransitionTyped 收到非法 from 状态值 %d，counter 标签按 open 兜底（fail-loud，#66/#104）：%v",
-			int(from), err)
+	_, errFrom := CircuitStateFromIntChecked(int(from))
+	_, errTo := CircuitStateFromIntChecked(int(to))
+	if err := errors.Join(errFrom, errTo); err != nil {
+		warn.Warnf("ObserveTransitionTyped 收到非法状态端点（from=%d, to=%d），拒绝本次迁移计数"+
+			"——不兜底写成 open 污染迁移矩阵（fail-loud，#139）：%v",
+			int(from), int(to), err)
+	} else {
+		m.guard.allow("breaker_transitions", service, kind, from.String(), to.String())
+		m.breakerTransitions.WithLabelValues(service, kind, from.String(), to.String()).Inc()
 	}
-	m.guard.allow("breaker_transitions", service, kind, from.String(), to.String())
-	m.breakerTransitions.WithLabelValues(service, kind, from.String(), to.String()).Inc()
 	m.ObserveBreakerStateTyped(service, kind, to)
 }
 
