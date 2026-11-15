@@ -63,9 +63,10 @@ const (
 // 本方法为**纯函数**（#104）：不再打印 stderr 告警。Stringer 会被 %v、
 // panic dump、pprof 标签、调试器间接调用——String 里做 I/O 副作用，消费方
 // 循环传非法态时告警逐事件刷屏且无法关闭。fail-loud 告警收敛到**显式转换/
-// 打点入口**：CircuitStateFromInt / ObserveBreakerStateTyped /
-// ObserveTransitionTyped（各自对非法值的 WARN 语义不变）。需要 error 的
-// 判定走 BreakerValue / CircuitStateFromIntChecked（非法值返回 ErrInvalidState）。
+// 打点入口**：CircuitStateFromIntChecked / ObserveBreakerStateTyped /
+// ObserveTransitionTyped（打点入口对非法值 WARN；迁移入口另拒绝本次计数，
+// 不把本方法的 "open" 兜底写进迁移矩阵标签，#139）。需要 error 的判定走
+// BreakerValue / CircuitStateFromIntChecked（非法值返回 ErrInvalidState）。
 func (s CircuitState) String() string {
 	switch s {
 	case CircuitStateClosed:
@@ -169,6 +170,16 @@ func (g *cardinalityGuard) allow(family string, labels ...string) {
 	set[key] = struct{}{}
 }
 
+// has 报告 family+labels 组合是否已记账（= 本实例已写过该序列）。
+// 与 allow 同一记账面：全部写入都经 allow 守卫，已记账即序列已存在。
+func (g *cardinalityGuard) has(family string, labels ...string) bool {
+	key := strings.Join(labels, "\x00")
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	_, ok := g.seen[family][key]
+	return ok
+}
+
 // Metrics 弹性指标集。
 //
 //	{ns}_breaker_state{service,kind}                        Gauge   当前熔断状态（0 closed/1 half-open/2 open）
@@ -196,6 +207,13 @@ type Metrics struct {
 // namespace 为空时用 "resilience"。同一 Registry + namespace 重复创建时
 // 复用已注册的 collector（多 Client/工厂共享指标是常态）。
 // opts 定制标签基数防护（WithLabelLimit，#105）。
+//
+// ⚠️ NewMetrics 只注册 collector，**不预写任何序列**（#138）：返回时
+// breaker_state 一条 series 都没有，service/kind 在首次 Observe* 之前完全
+// 缺席——breaker_state==2 类告警在「新服务刚接入、还没发生过迁移」的窗口
+// 内不触发，看板上是空白而不是 0=closed。需要「序列从创建即存在」的消费方
+// 构造后立即调用 InitService 显式补位（httpx 的熔断 gauge 初始化行即此
+// 义务的既有手补形态）。
 func NewMetrics(reg prom.Registerer, namespace string, opts ...MetricsOption) *Metrics {
 	if reg == nil {
 		reg = metrics.Registry
@@ -233,8 +251,31 @@ func NewMetrics(reg prom.Registerer, namespace string, opts ...MetricsOption) *M
 	return m
 }
 
-// ObserveBreakerStateTyped 记录熔断器当前状态（创建时置 closed、迁移时置
-// 新状态）。
+// InitService 为 (service, kind) 预写 breaker_state=0（closed），让序列
+// **从创建即存在**（#138）：breaker_state==2 类告警与按服务看板对「新接入、
+// 尚未发生过迁移」的服务有信号（缺席序列不满足比较——告警盲区；看板空白
+// 无法区分「没接入」与「正常关闭」）。
+//
+// NewMetrics 只注册 collector、不预写任何序列，本方法是那个缺口的显式
+// 补位（httpx 构造期手补一行 ObserveBreakerStateTyped(..., Closed) 的
+// 单源化，义务从消费方注释升格为库方法）。应在构造期、任何 Observe*
+// 之前调用：本实例已写过该组合时幂等跳过（不把已推进的状态重置回
+// closed）；跨实例共享 collector 的场景请在各自构造期调用——迟到调用
+// 可能把已反映真实状态的 gauge 写回 0（状态此后由 ObserveBreakerStateTyped /
+// ObserveTransitionTyped 维护）。
+func (m *Metrics) InitService(service, kind string) {
+	if m.guard.has("breaker_state", service, kind) {
+		return // 幂等：序列已由本实例创建/写过，不重置已推进的状态
+	}
+	m.guard.allow("breaker_state", service, kind)
+	m.breakerState.WithLabelValues(service, kind).Set(0)
+}
+
+// ObserveBreakerStateTyped 记录熔断器当前状态（迁移时置新状态）。
+//
+// 「创建时置 closed」不在本方法也不在 NewMetrics——序列的创建由
+// InitService 显式完成（#138：NewMetrics 只注册 collector，本方法在
+// 首次调用前对该 service/kind 没有任何可写的「创建时」）。
 //
 // 状态以类型化 CircuitState 传入：数值序与 gobreaker.State 一致
 // （Closed=0/HalfOpen=1/Open=2），错位在编译期即被消费侧的钉子挡住，
@@ -260,18 +301,26 @@ func (m *Metrics) ObserveBreakerStateTyped(service, kind string, state CircuitSt
 // 状态以类型化 CircuitState 传入：标签值由枚举决定，调用方无需（也不应）
 // 自己拼字符串或裸传 int——数值错位在编译期即被消费侧的钉子挡住。
 //
-// 非法端点值的 fail-loud 由本显式入口承担（#104：String 已纯函数化，不再
-// 打印）——from 在写 counter 前校验告警，to 由 ObserveBreakerStateTyped 校验；
-// 两端的 counter 标签仍按 String 的 "open" 兜底不变（宁可假警报，不谎报健康）。
+// 两端先各过 CircuitStateFromIntChecked，与 gauge 同一校验口径（#139）：
+// 任一端非法 ⇒ **拒绝本次迁移计数**并打 WARN——不把非法值经 String() 的
+// "open" 兜底写进 from/to 标签，那会往迁移矩阵记一次从未发生的 open→X
+// 迁移（指标说谎，#39/#66 同族）；当前状态 gauge 照常刷新（非法 to 由
+// ObserveBreakerStateTyped 按既有口径 WARN + 归 open，两条 WARN 各说各的
+// 事实：计数被拒 / gauge 兜底）。from/to 标签与 gauge 数值永远出自同一
+// 校验口径，不再「一个方法两套处置」。
 //
-// 时序与历史入口保持一致：先算好两端标签值，再写 counter，最后刷 gauge。
+// 时序与历史入口保持一致：先校验，再写 counter，最后刷 gauge。
 func (m *Metrics) ObserveTransitionTyped(service, kind string, from, to CircuitState) {
-	if _, err := CircuitStateFromIntChecked(int(from)); err != nil {
-		warn.Warnf("ObserveTransitionTyped 收到非法 from 状态值 %d，counter 标签按 open 兜底（fail-loud，#66/#104）：%v",
-			int(from), err)
+	_, errFrom := CircuitStateFromIntChecked(int(from))
+	_, errTo := CircuitStateFromIntChecked(int(to))
+	if err := errors.Join(errFrom, errTo); err != nil {
+		warn.Warnf("ObserveTransitionTyped 收到非法状态端点（from=%d, to=%d），拒绝本次迁移计数"+
+			"——不兜底写成 open 污染迁移矩阵（fail-loud，#139）：%v",
+			int(from), int(to), err)
+	} else {
+		m.guard.allow("breaker_transitions", service, kind, from.String(), to.String())
+		m.breakerTransitions.WithLabelValues(service, kind, from.String(), to.String()).Inc()
 	}
-	m.guard.allow("breaker_transitions", service, kind, from.String(), to.String())
-	m.breakerTransitions.WithLabelValues(service, kind, from.String(), to.String()).Inc()
 	m.ObserveBreakerStateTyped(service, kind, to)
 }
 
