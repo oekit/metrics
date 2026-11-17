@@ -1,3 +1,7 @@
+## [v0.4.2] — 2026-11-18
+
+- build: 矩阵依赖地板对齐(pkg v0.53.0)
+
 ## [v0.4.1] — 2026-11-15
 
 - InitService 显式预写序列（#138）：NewMetrics 只注册 collector 的缺席面写进 godoc，新增 InitService 幂等预写 breaker_state=0，撤掉「创建时置 closed」的假承诺
