@@ -22,6 +22,7 @@ import (
 	"sync"
 
 	"github.com/oekit/metrics"
+	"github.com/oekit/metrics/internal/register"
 	"github.com/oekit/metrics/internal/warn"
 	prom "github.com/prometheus/client_golang/prometheus"
 )
@@ -345,32 +346,18 @@ func (m *Metrics) ObserveRetry(service, kind string) {
 // 不可定位的 "interface conversion: prometheus.Collector is
 // *prometheus.CounterVec, not *prometheus.GaugeVec"；改为换成人能读懂的错误
 // （既有类型 vs 请求类型 + 怎么改）。
+//
+// #148：骨架（Register → errors.As AlreadyRegisteredError → 类型断言 →
+// 复用/异型处置 → panic）下沉 internal/register 单源内核，本函数退化为
+// WithForeignFresh 处置选项的实例化薄壳。异型降级返回**未注册 fresh**是
+// 本面文档化语义（#44 可观测降级 + #73 指标黑洞叙事：降级实例从未注册进
+// Registry，写它不进任何抓取面，唯一信号是那条 stderr WARN；对齐「其余
+// 错误仍 panic」的边界：Register 的其它错误依旧 panic）——与根包
+// registerTolerant 的「返回零值」不可互换，勿在收敛时抹平。
 func registerReuse[T prom.Collector](reg prom.Registerer, fresh T) T {
-	if err := reg.Register(fresh); err != nil {
-		var are prom.AlreadyRegisteredError
-		if errors.As(err, &are) {
-			existing, ok := are.ExistingCollector.(T)
-			if !ok {
-				// 同名但**类型不同**（#44）：消费方先注册过同名 GaugeVec 再换
-				// CounterVec，或两个子系统共享 Registry 撞名。此前 here 是硬断言
-				// panic——Registry 是进程级共享面，撞名是运行期组合态而非启动
-				// 期配置错误，一个子系统炸死整个进程不成比例。降级为可观测：
-				// 新建独立实例照常返回。注意降级实例**从未注册进 Registry**
-				// （Register 已经失败，fresh 不在任何抓取面上）：写它的指标是
-				// **指标黑洞**，监控里不会出现第二套序列——唯一信号是本条
-				// stderr WARN（#73 更正叙事：此前「指标多一套同名不同型的
-				// 时间序列、监控里看到两套再修」的说法失实，掩盖了数据丢失面）。
-				// 排障请按 WARN 立即改 namespace 或统一类型，恢复正常注册路径。
-				// 对齐「其余错误仍 panic」的边界：Register 的其它错误
-				// （Registry 不可用等）依旧 panic。
-				warn.Warnf("同名 collector 类型不符，降级实例未注册进 Registry（写入不进任何抓取面，该实例指标黑洞）："+
-					"已注册 %T，请求 %T——请改用同一类型的同名指标或换 namespace",
-					are.ExistingCollector, fresh)
-				return fresh
-			}
-			return existing
-		}
+	got, err := register.Reuse(reg, fresh, register.WithForeignFresh())
+	if err != nil {
 		panic(err)
 	}
-	return fresh
+	return got
 }

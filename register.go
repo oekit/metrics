@@ -1,11 +1,7 @@
 package metrics
 
 import (
-	"errors"
-	"fmt"
-	"reflect"
-
-	"github.com/oekit/metrics/internal/warn"
+	"github.com/oekit/metrics/internal/register"
 
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -15,6 +11,12 @@ import (
 // 异型人话 panic）与本仓根包 registerBuildInfo/registerStartTime（容忍面：
 // 撞名复用/异型降级 WARN）。must 面收敛为导出的 RegisterReuse 供
 // httpx/middleware 等消费方切换；容忍面收敛为内部的 registerTolerant。
+//
+// #148：must/容忍两族的共享骨架（Register → errors.As
+// AlreadyRegisteredError → 类型断言 → 复用/异型处置 → panic/上抛）进一步
+// 收敛到 internal/register 一份内核 + 行为选项（异型处置：panic/零值/fresh；
+// 复用可观测），本文件与 resilience.registerReuse 退化为带 nil 回退、文案
+// 参数与处置选项实例化的薄壳。
 
 // RegisterReuseOption 是 RegisterReuse 的函数选项。
 type RegisterReuseOption func(*registerReuseConfig)
@@ -69,7 +71,9 @@ func WithReuseOwner(owner string) RegisterReuseOption {
 //
 // 需要撞名**降级**（异型不 panic、WARN 可观测）的容忍语义是另一族：本仓根包
 // Init 的 registerTolerant 与 resilience 子包的 registerReuse——不要用本函数
-// 承载容忍场景，语义边界见各处 godoc。
+// 承载容忍场景，语义边界见各处 godoc；两族共享的骨架内核在
+// internal/register（#148，异型处置以行为选项表达，本文档的 panic 即
+// WithForeignPanic）。
 //
 // reg 为 nil 时回退到包级 metrics.Registry（#109，「nil 参数 = 显式回退默认值」
 // 总则②）——与姊妹 API resilience.NewMetrics 的 nil 回退同一处（平台 /metrics
@@ -79,34 +83,22 @@ func RegisterReuse[T prometheus.Collector](reg prometheus.Registerer, fresh T, o
 	if reg == nil {
 		reg = Registry
 	}
-	if err := reg.Register(fresh); err != nil {
-		var are prometheus.AlreadyRegisteredError
-		if errors.As(err, &are) {
-			existing, ok := are.ExistingCollector.(T)
-			if !ok {
-				cfg := registerReuseConfig{owner: "metrics"}
-				for _, opt := range opts {
-					opt(&cfg)
-				}
-				panic(fmt.Errorf("%s: 同名 collector 类型不符：已注册 %T，请求 %T"+
-					"（fqName 与描述符相同但类型不同——请改用同一类型的同名指标，或换 namespace）",
-					cfg.owner, are.ExistingCollector, fresh))
-			}
-			return existing
-		}
+	cfg := registerReuseConfig{owner: "metrics"}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	got, err := register.Reuse(reg, fresh, register.WithForeignPanic(cfg.owner))
+	if err != nil {
 		panic(err)
 	}
-	return fresh
+	return got
 }
-
-// warnBlackHoleTail 撞名降级文案的固定尾巴（#101 收敛为常量防漂移）：
-// 导出变量不在抓取面上、直接写它是指标黑洞——#73 更正叙事的承诺措辞。
-const warnBlackHoleTail = "；导出变量 %s 不在抓取面上，直接写它是指标黑洞"
 
 // registerTolerant 是根包 Init 撞名容忍注册的共享泛型内核（#99：此前
 // registerBuildInfo/registerStartTime 是 25 行复制粘贴，仅类型/指标名/
-// 导出变量名不同）。语义（#90 撞名容忍，与 resilience.registerReuse 同一
-// 哲学）：
+// 导出变量名不同；#148 起骨架下沉 internal/register，本函数是 root 容忍面
+// 处置选项的实例化薄壳）。语义（#90 撞名容忍，与 resilience.registerReuse
+// 同一哲学）：
 //   - 首次注册 → 返回 fresh，error 为 nil；
 //   - 既有实例就是 fresh 本身（消费方预注册导出变量的合法路径）→ 幂等返回，
 //     不打 WARN，初始值照常写（写的就是抓取面上的同一实例）；
@@ -121,28 +113,12 @@ const warnBlackHoleTail = "；导出变量 %s 不在抓取面上，直接写它�
 // name 为指标名（文案定位用，如 "app_build_info"）；exportVar 为导出变量
 // 全名（黑洞文案用，如 "metrics.BuildInfo"）。异型文案的「请求类型」经
 // reflect.TypeFor[T]() 从类型参数推导（Go 1.22+），不再随调用点手拼字符串。
+//
+// ⚠️ 异型降级返回**零值**是本面文档化语义（写值侧判空跳过），与
+// resilience.registerReuse 的「返回未注册 fresh」不可互换——两侧降级产物
+// 的消费契约不同，勿在收敛时抹平（#148）。
 func registerTolerant[T prometheus.Collector](reg prometheus.Registerer, fresh T, name, exportVar string) (T, error) {
-	if err := reg.Register(fresh); err != nil {
-		var are prometheus.AlreadyRegisteredError
-		if !errors.As(err, &are) {
-			var zero T
-			return zero, err
-		}
-		if any(are.ExistingCollector) == any(fresh) {
-			return fresh, nil
-		}
-		existing, ok := are.ExistingCollector.(T)
-		if !ok {
-			warn.Warnf("%s 撞名异型（已注册 %T，请求 %s），降级跳过：Init 不写初始值，%s 序列以既有实现供给"+
-				warnBlackHoleTail,
-				name, are.ExistingCollector, reflect.TypeFor[T](), name, exportVar)
-			var zero T
-			return zero, nil
-		}
-		warn.Warnf("Registry 已有同名同型的 %s（非导出变量本身），Init 复用既有实例写初始值"+
-			warnBlackHoleTail,
-			name, exportVar)
-		return existing, nil
-	}
-	return fresh, nil
+	return register.Reuse(reg, fresh,
+		register.WithForeignZero(name, exportVar),
+		register.WithReuseWarn())
 }
