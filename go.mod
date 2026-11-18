@@ -3,7 +3,7 @@ module github.com/oekit/metrics
 go 1.26.0
 
 require (
-	github.com/oekit/core v0.16.0
+	github.com/oekit/core v0.17.0
 	github.com/prometheus/client_golang v1.23.2
 )
 
