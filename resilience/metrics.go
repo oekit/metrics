@@ -2,10 +2,21 @@
 // 指标集，供 network/httpx 与 nns/endpoint 等弹性栈消费方复用，保证
 // 全库熔断/重试可观测性的指标命名与标签基数规范一致（平台契约 §5.5）。
 //
-// 标签约定：
-//   - service: 目标服务名（受控低基数）
+// # 标签约定（#159 语义单源）
+//
+//   - service: **目标服务名**（被熔断/重试的下游，受控低基数）。本族全部
+//     序列的 service 一律代表目标方——谁调用它（上游）不属于 service。
+//   - caller:  **调用方标识**（发起调用的上游服务名，受控低基数，可选）。
+//     未迁移的生产者不传 caller 时写空串 ""（PromQL 中空 label 与缺席等价），
+//     按 sum by (service, kind) 聚合的既有看板/告警不受影响；需要调用方
+//     维度拆分时按 caller 聚合。httpx 历史上把调用方标识写进了 service
+//     （metrics#159）：跨仓对齐在后续波完成，metrics 侧先提供语义明确的
+//     第二 label 与常量/入口，不阻塞消费方渐进迁移。
 //   - kind:    弹性栈标识（如 "httpx" / "nns-http" / "nns-grpc"，固定有限集）
 //   - from/to: 熔断状态迁移端点（closed/half_open/open，固定有限集）
+//
+// 标签名以 Label* 常量为单源（LabelService/LabelCaller/LabelKind/LabelFrom/
+// LabelTo）；消费方构造 PromQL、文档与测试时引用常量，禁止手写字面量。
 //
 // 禁止将实例地址、方法名等高基数来源作为标签。
 //
@@ -25,6 +36,24 @@ import (
 	"github.com/oekit/metrics/internal/register"
 	"github.com/oekit/metrics/internal/warn"
 	prom "github.com/prometheus/client_golang/prometheus"
+)
+
+// 弹性指标族标签名常量（#159 单源）。
+//
+// 消费方构造 PromQL、看板、文档与测试时引用这些常量，禁止手写 "service" /
+// "caller" 等字面量——标签名一旦演进只需改本处，不必全矩阵 grep。
+// 语义见包文档「标签约定」：service 恒为目标服务，caller 永远是调用方标识。
+const (
+	// LabelService 目标服务名（被熔断/重试的下游）。
+	LabelService = "service"
+	// LabelCaller 调用方标识（发起调用的上游；空串表示未标识）。
+	LabelCaller = "caller"
+	// LabelKind 弹性栈标识（如 "httpx" / "nns-http" / "nns-grpc"）。
+	LabelKind = "kind"
+	// LabelFrom 熔断状态迁移的起点（closed/half_open/open）。
+	LabelFrom = "from"
+	// LabelTo 熔断状态迁移的终点（closed/half_open/open）。
+	LabelTo = "to"
 )
 
 // CircuitState 熔断器状态（类型化）。
@@ -183,10 +212,14 @@ func (g *cardinalityGuard) has(family string, labels ...string) bool {
 
 // Metrics 弹性指标集。
 //
-//	{ns}_breaker_state{service,kind}                        Gauge   当前熔断状态（0 closed/1 half-open/2 open）
-//	{ns}_breaker_transitions_total{service,kind,from,to}    Counter 状态迁移计数
-//	{ns}_breaker_rejected_total{service,kind}               Counter 熔断打开期间被拒绝的调用数
-//	{ns}_retry_attempts_total{service,kind}                 Counter 额外重试尝试计数（不含首次）
+//	{ns}_breaker_state{service,caller,kind}                     Gauge   当前熔断状态（0 closed/1 half-open/2 open）
+//	{ns}_breaker_transitions_total{service,caller,kind,from,to} Counter 状态迁移计数
+//	{ns}_breaker_rejected_total{service,caller,kind}            Counter 熔断打开期间被拒绝的调用数
+//	{ns}_retry_attempts_total{service,caller,kind}              Counter 额外重试尝试计数（不含首次）
+//
+// service 恒为**目标服务**、caller 为**调用方标识**（#159，见包文档
+// 「标签约定」）。caller 可选：既有调用点不传时写空串，序列仍可按
+// sum by (service, kind) 聚合。
 //
 // 标签基数防护（#105）：每个 family 的标签组合数有上限（缺省
 // DefaultLabelLimit，WithLabelLimit 可调），超限的新组合在首次写入时
@@ -210,8 +243,8 @@ type Metrics struct {
 // opts 定制标签基数防护（WithLabelLimit，#105）。
 //
 // ⚠️ NewMetrics 只注册 collector，**不预写任何序列**（#138）：返回时
-// breaker_state 一条 series 都没有，service/kind 在首次 Observe* 之前完全
-// 缺席——breaker_state==2 类告警在「新服务刚接入、还没发生过迁移」的窗口
+// breaker_state 一条 series 都没有，service/caller/kind 在首次 Observe*
+// 之前完全缺席——breaker_state==2 类告警在「新服务刚接入、还没发生过迁移」的窗口
 // 内不触发，看板上是空白而不是 0=closed。需要「序列从创建即存在」的消费方
 // 构造后立即调用 InitService 显式补位（httpx 的熔断 gauge 初始化行即此
 // 义务的既有手补形态）。
@@ -233,29 +266,48 @@ func NewMetrics(reg prom.Registerer, namespace string, opts ...MetricsOption) *M
 		Name:      "breaker_state",
 		Namespace: namespace,
 		Help:      "Circuit breaker state: 0=closed 1=half_open 2=open.",
-	}, []string{"service", "kind"}))
+	}, []string{LabelService, LabelCaller, LabelKind}))
 	m.breakerTransitions = registerReuse(reg, prom.NewCounterVec(prom.CounterOpts{
 		Name:      "breaker_transitions_total",
 		Namespace: namespace,
 		Help:      "Total number of circuit breaker state transitions.",
-	}, []string{"service", "kind", "from", "to"}))
+	}, []string{LabelService, LabelCaller, LabelKind, LabelFrom, LabelTo}))
 	m.breakerRejected = registerReuse(reg, prom.NewCounterVec(prom.CounterOpts{
 		Name:      "breaker_rejected_total",
 		Namespace: namespace,
 		Help:      "Total number of calls rejected while the circuit breaker was open.",
-	}, []string{"service", "kind"}))
+	}, []string{LabelService, LabelCaller, LabelKind}))
 	m.retryAttempts = registerReuse(reg, prom.NewCounterVec(prom.CounterOpts{
 		Name:      "retry_attempts_total",
 		Namespace: namespace,
 		Help:      "Total number of retry attempts (excluding the initial attempt).",
-	}, []string{"service", "kind"}))
+	}, []string{LabelService, LabelCaller, LabelKind}))
 	return m
 }
 
-// InitService 为 (service, kind) 预写 breaker_state=0（closed），让序列
-// **从创建即存在**（#138）：breaker_state==2 类告警与按服务看板对「新接入、
-// 尚未发生过迁移」的服务有信号（缺席序列不满足比较——告警盲区；看板空白
-// 无法区分「没接入」与「正常关闭」）。
+// callerOf 归一化可选 caller 参数（#159）：零个 ⇒ ""（调用方未标识，PromQL
+// 中空 label 与缺席等价）；一个 ⇒ 原值；多个 ⇒ 违反「调用方标识单值」契约的
+// 编程错误，fail-fast panic（与标签基数防护同口径，不静默丢弃多余参数）。
+func callerOf(caller []string) string {
+	switch len(caller) {
+	case 0:
+		return ""
+	case 1:
+		return caller[0]
+	default:
+		panic(fmt.Sprintf("resilience: caller 至多一个，got %d (%q)——调用方标识是单值语义，"+
+			"多调用方场景请按 caller 分别打点（#159）", len(caller), caller))
+	}
+}
+
+// InitService 为 (service, caller, kind) 预写 breaker_state=0（closed），让
+// 序列**从创建即存在**（#138）：breaker_state==2 类告警与按服务看板对「新接
+// 入、尚未发生过迁移」的服务有信号（缺席序列不满足比较——告警盲区；看板
+// 空白无法区分「没接入」与「正常关闭」）。
+//
+// service 为目标服务、caller 为调用方标识（#159，见包文档「标签约定」）。
+// caller 是可选尾参：不传写空串（未标识，既有调用点无需改动）；传多个
+// fail-fast panic。
 //
 // NewMetrics 只注册 collector、不预写任何序列，本方法是那个缺口的显式
 // 补位（httpx 构造期手补一行 ObserveBreakerStateTyped(..., Closed) 的
@@ -264,19 +316,23 @@ func NewMetrics(reg prom.Registerer, namespace string, opts ...MetricsOption) *M
 // closed）；跨实例共享 collector 的场景请在各自构造期调用——迟到调用
 // 可能把已反映真实状态的 gauge 写回 0（状态此后由 ObserveBreakerStateTyped /
 // ObserveTransitionTyped 维护）。
-func (m *Metrics) InitService(service, kind string) {
-	if m.guard.has("breaker_state", service, kind) {
+func (m *Metrics) InitService(service, kind string, caller ...string) {
+	c := callerOf(caller)
+	if m.guard.has("breaker_state", service, c, kind) {
 		return // 幂等：序列已由本实例创建/写过，不重置已推进的状态
 	}
-	m.guard.allow("breaker_state", service, kind)
-	m.breakerState.WithLabelValues(service, kind).Set(0)
+	m.guard.allow("breaker_state", service, c, kind)
+	m.breakerState.WithLabelValues(service, c, kind).Set(0)
 }
 
 // ObserveBreakerStateTyped 记录熔断器当前状态（迁移时置新状态）。
 //
+// service 为目标服务、caller 为调用方标识（#159）；caller 可选，不传写
+// 空串，语义与限制同 InitService。
+//
 // 「创建时置 closed」不在本方法也不在 NewMetrics——序列的创建由
 // InitService 显式完成（#138：NewMetrics 只注册 collector，本方法在
-// 首次调用前对该 service/kind 没有任何可写的「创建时」）。
+// 首次调用前对该 service/caller/kind 没有任何可写的「创建时」）。
 //
 // 状态以类型化 CircuitState 传入：数值序与 gobreaker.State 一致
 // （Closed=0/HalfOpen=1/Open=2），错位在编译期即被消费侧的钉子挡住，
@@ -286,18 +342,22 @@ func (m *Metrics) InitService(service, kind string) {
 // gauge 数值被 help 文本解释为状态档位，写歪即「指标说谎」（#39/#66 同族）。
 // 非法值降级为 fail-loud：stderr WARN 可观测 + gauge 归 2（=
 // CircuitStateOpen，宁可假警报，不谎报健康，#69）。
-func (m *Metrics) ObserveBreakerStateTyped(service, kind string, state CircuitState) {
+func (m *Metrics) ObserveBreakerStateTyped(service, kind string, state CircuitState, caller ...string) {
+	c := callerOf(caller)
 	cs, err := CircuitStateFromIntChecked(int(state))
 	if err != nil {
 		warn.Warnf("ObserveBreakerStateTyped 收到非法状态值 %d，gauge 按 open 兜底（fail-loud，#69）：%v",
 			int(state), err)
 		cs = CircuitStateOpen
 	}
-	m.guard.allow("breaker_state", service, kind)
-	m.breakerState.WithLabelValues(service, kind).Set(float64(cs))
+	m.guard.allow("breaker_state", service, c, kind)
+	m.breakerState.WithLabelValues(service, c, kind).Set(float64(cs))
 }
 
 // ObserveTransitionTyped 记录一次状态迁移（同时刷新当前状态 gauge）。
+//
+// service 为目标服务、caller 为调用方标识（#159）；caller 可选，不传写
+// 空串，语义与限制同 InitService。
 //
 // 状态以类型化 CircuitState 传入：标签值由枚举决定，调用方无需（也不应）
 // 自己拼字符串或裸传 int——数值错位在编译期即被消费侧的钉子挡住。
@@ -311,7 +371,8 @@ func (m *Metrics) ObserveBreakerStateTyped(service, kind string, state CircuitSt
 // 校验口径，不再「一个方法两套处置」。
 //
 // 时序与历史入口保持一致：先校验，再写 counter，最后刷 gauge。
-func (m *Metrics) ObserveTransitionTyped(service, kind string, from, to CircuitState) {
+func (m *Metrics) ObserveTransitionTyped(service, kind string, from, to CircuitState, caller ...string) {
+	c := callerOf(caller)
 	_, errFrom := CircuitStateFromIntChecked(int(from))
 	_, errTo := CircuitStateFromIntChecked(int(to))
 	if err := errors.Join(errFrom, errTo); err != nil {
@@ -319,22 +380,30 @@ func (m *Metrics) ObserveTransitionTyped(service, kind string, from, to CircuitS
 			"——不兜底写成 open 污染迁移矩阵（fail-loud，#139）：%v",
 			int(from), int(to), err)
 	} else {
-		m.guard.allow("breaker_transitions", service, kind, from.String(), to.String())
-		m.breakerTransitions.WithLabelValues(service, kind, from.String(), to.String()).Inc()
+		m.guard.allow("breaker_transitions", service, c, kind, from.String(), to.String())
+		m.breakerTransitions.WithLabelValues(service, c, kind, from.String(), to.String()).Inc()
 	}
-	m.ObserveBreakerStateTyped(service, kind, to)
+	m.ObserveBreakerStateTyped(service, kind, to, c)
 }
 
 // ObserveRejected 记录一次熔断打开期的调用拒绝。
-func (m *Metrics) ObserveRejected(service, kind string) {
-	m.guard.allow("breaker_rejected", service, kind)
-	m.breakerRejected.WithLabelValues(service, kind).Inc()
+//
+// service 为目标服务、caller 为调用方标识（#159）；caller 可选，不传写
+// 空串，语义与限制同 InitService。
+func (m *Metrics) ObserveRejected(service, kind string, caller ...string) {
+	c := callerOf(caller)
+	m.guard.allow("breaker_rejected", service, c, kind)
+	m.breakerRejected.WithLabelValues(service, c, kind).Inc()
 }
 
 // ObserveRetry 记录一次额外重试尝试（不含首次）。
-func (m *Metrics) ObserveRetry(service, kind string) {
-	m.guard.allow("retry_attempts", service, kind)
-	m.retryAttempts.WithLabelValues(service, kind).Inc()
+//
+// service 为目标服务、caller 为调用方标识（#159）；caller 可选，不传写
+// 空串，语义与限制同 InitService。
+func (m *Metrics) ObserveRetry(service, kind string, caller ...string) {
+	c := callerOf(caller)
+	m.guard.allow("retry_attempts", service, c, kind)
+	m.retryAttempts.WithLabelValues(service, c, kind).Inc()
 }
 
 // registerReuse 注册 collector，同名已注册时复用既有实例（多 Client/工厂

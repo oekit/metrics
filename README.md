@@ -19,7 +19,9 @@ go get github.com/oekit/metrics@v0.4.2
 ## 组成
 
 - 根包：`Init(serviceName)` 初始化默认 Registry、指标注册辅助
-- `resilience`：熔断状态/迁移/拒绝 + 重试计数的共享指标族，labels 统一 `{service, kind}`
+- `resilience`：熔断状态/迁移/拒绝 + 重试计数的共享指标族，labels 统一
+  `{service, caller, kind}`——`service` 恒为**目标服务**、`caller` 为**调用方标识**
+  （可选，缺省空串；#159）
 
 ## 快速使用
 

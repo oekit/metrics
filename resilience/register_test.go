@@ -23,7 +23,7 @@ func TestRegisterReuse_TypeMismatch_DegradesObservably(t *testing.T) {
 		Name:      "breaker_state",
 		Namespace: "resilience",
 		Help:      "Circuit breaker state: 0=closed 1=half_open 2=open.",
-	}, []string{"service", "kind"}))
+	}, []string{LabelService, LabelCaller, LabelKind}))
 
 	// stderr WARN 可观测
 	r, w, err := os.Pipe()
@@ -37,7 +37,7 @@ func TestRegisterReuse_TypeMismatch_DegradesObservably(t *testing.T) {
 		Name:      "breaker_state",
 		Namespace: "resilience",
 		Help:      "Circuit breaker state: 0=closed 1=half_open 2=open.",
-	}, []string{"service", "kind"}))
+	}, []string{LabelService, LabelCaller, LabelKind}))
 
 	w.Close()
 	os.Stderr = oldStderr
@@ -63,7 +63,7 @@ func TestRegisterReuse_TypeMismatch_DegradesObservably(t *testing.T) {
 		Name:      "breaker_state",
 		Namespace: "resilience",
 		Help:      "Circuit breaker state: 0=closed 1=half_open 2=open.",
-	}, []string{"service", "kind"}))
+	}, []string{LabelService, LabelCaller, LabelKind}))
 	if again == nil {
 		t.Fatal("再次降级也必须返回可用实例")
 	}
@@ -179,7 +179,7 @@ func TestRegisterReuse_TypeMismatch_DegradeInstanceNotRegistered(t *testing.T) {
 		Name:      "breaker_state",
 		Namespace: "resilience",
 		Help:      "Circuit breaker state: 0=closed 1=half_open 2=open.",
-	}, []string{"service", "kind"}))
+	}, []string{LabelService, LabelCaller, LabelKind}))
 
 	// stderr WARN 捕获（口径同 TestRegisterReuse_TypeMismatch_DegradesObservably）
 	r, w, err := os.Pipe()
@@ -193,7 +193,7 @@ func TestRegisterReuse_TypeMismatch_DegradeInstanceNotRegistered(t *testing.T) {
 		Name:      "breaker_state",
 		Namespace: "resilience",
 		Help:      "Circuit breaker state: 0=closed 1=half_open 2=open.",
-	}, []string{"service", "kind"}))
+	}, []string{LabelService, LabelCaller, LabelKind}))
 
 	w.Close()
 	os.Stderr = oldStderr
@@ -207,7 +207,7 @@ func TestRegisterReuse_TypeMismatch_DegradeInstanceNotRegistered(t *testing.T) {
 		t.Fatal("降级路径必须返回可用实例")
 	}
 	// 降级实例可写（调用方继续跑，不 panic）
-	got.WithLabelValues("svc-b", "kind-b").Set(7)
+	got.WithLabelValues("svc-b", "caller-b", "kind-b").Set(7)
 
 	// 但写入不进任何抓取面（#73）：Gather 面上不得出现降级实例的任何序列
 	mfs, err := reg.Gather()
