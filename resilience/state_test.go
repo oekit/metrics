@@ -47,10 +47,10 @@ var stateFixture = []stateCase{
 func wantExposition(fx stateCase) string {
 	return fmt.Sprintf(`# HELP test_breaker_state Circuit breaker state: 0=closed 1=half_open 2=open.
 # TYPE test_breaker_state gauge
-test_breaker_state{kind="httpx",service="svc"} %d
+test_breaker_state{caller="",kind="httpx",service="svc"} %d
 # HELP test_breaker_transitions_total Total number of circuit breaker state transitions.
 # TYPE test_breaker_transitions_total counter
-test_breaker_transitions_total{from="%s",kind="httpx",service="svc",to="%s"} 1
+test_breaker_transitions_total{caller="",from="%s",kind="httpx",service="svc",to="%s"} 1
 `, fx.to, fx.wantFrom, fx.wantTo)
 }
 
@@ -139,7 +139,7 @@ func TestObserveBreakerState_TypedMatchesGaugeHelp(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			m, _ := newTestMetrics()
 			m.ObserveBreakerStateTyped("svc", "httpx", c.state)
-			if got := testutil.ToFloat64(m.breakerState.WithLabelValues("svc", "httpx")); got != c.want {
+			if got := testutil.ToFloat64(m.breakerState.WithLabelValues("svc", "", "httpx")); got != c.want {
 				t.Fatalf("ObserveBreakerStateTyped(%v) gauge=%v, want %v", c.state, got, c.want)
 			}
 		})
@@ -153,7 +153,7 @@ func TestObserveTransitionTyped_RefreshesGaugeWithoutWarn(t *testing.T) {
 	out := captureStderr(t, func() {
 		m.ObserveTransitionTyped("svc", "httpx", CircuitStateClosed, CircuitStateOpen)
 	})
-	if got := testutil.ToFloat64(m.breakerState.WithLabelValues("svc", "httpx")); got != 2 {
+	if got := testutil.ToFloat64(m.breakerState.WithLabelValues("svc", "", "httpx")); got != 2 {
 		t.Fatalf("ObserveTransitionTyped 后 gauge=%v, want 2", got)
 	}
 	if out != "" {
@@ -216,14 +216,14 @@ func TestObserveTransitionTyped_InvalidFromRejected(t *testing.T) {
 	if !strings.Contains(out, "拒绝本次迁移计数") || !strings.Contains(out, "from=99") {
 		t.Fatalf("WARN 应指明拒绝计数与非法端点值：%q", out)
 	}
-	if got := testutil.ToFloat64(m.breakerState.WithLabelValues("svc", "httpx")); got != 0 {
+	if got := testutil.ToFloat64(m.breakerState.WithLabelValues("svc", "", "httpx")); got != 0 {
 		t.Fatalf("gauge 照常按 to 刷新，got %v, want 0", got)
 	}
 	// 迁移家族零序列（拒绝计数）：期望文本里只有 gauge——任何 from="open"
 	// 兜底序列的出现都会让比对失败。
 	want := `# HELP test_breaker_state Circuit breaker state: 0=closed 1=half_open 2=open.
 # TYPE test_breaker_state gauge
-test_breaker_state{kind="httpx",service="svc"} 0
+test_breaker_state{caller="",kind="httpx",service="svc"} 0
 `
 	if err := testutil.GatherAndCompare(reg, strings.NewReader(want),
 		"test_breaker_state", "test_breaker_transitions_total"); err != nil {
@@ -253,12 +253,12 @@ func TestObserveTransitionTyped_InvalidToRejected(t *testing.T) {
 	if !strings.Contains(out, "to=99") {
 		t.Fatalf("WARN 应指明非法 to 端点：%q", out)
 	}
-	if got := testutil.ToFloat64(m.breakerState.WithLabelValues("svc", "httpx")); got != 2 {
+	if got := testutil.ToFloat64(m.breakerState.WithLabelValues("svc", "", "httpx")); got != 2 {
 		t.Fatalf("gauge 按既有口径归 open（#69），got %v, want 2", got)
 	}
 	want := `# HELP test_breaker_state Circuit breaker state: 0=closed 1=half_open 2=open.
 # TYPE test_breaker_state gauge
-test_breaker_state{kind="httpx",service="svc"} 2
+test_breaker_state{caller="",kind="httpx",service="svc"} 2
 `
 	if err := testutil.GatherAndCompare(reg, strings.NewReader(want),
 		"test_breaker_state", "test_breaker_transitions_total"); err != nil {
