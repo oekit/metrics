@@ -1,3 +1,11 @@
+## [v0.4.3] — 2026-11-21
+
+- 第三轮设计/缺陷审计（2026-11-21）metrics 修复：
+
+- feat: 弹性指标族新增 caller label（非破坏：可选尾参 caller ...string，旧调用点写空值；LabelService/LabelCaller/LabelKind 常量单源）——service 统一文档为「目标服务」，httpx 调用方标识与 nns-endpoint 目标服务不再共用同一 label 语义（#159）
+
+关联问题单：metrics#159。
+
 ## [v0.4.2] — 2026-11-18
 
 - build: 矩阵依赖地板对齐(pkg v0.53.0)
